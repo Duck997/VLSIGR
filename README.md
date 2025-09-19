@@ -1,6 +1,19 @@
-# VLSI Global Router
+# High-Performance VLSI Global Router with Adaptive Algorithm Design
 
-A high-performance global routing implementation for VLSI design, featuring advanced algorithms and optimization techniques.
+A high-performance VLSI global router implementation that incorporates adaptive algorithms and intelligent scoring mechanisms to achieve competitive routing quality in integrated circuit design.
+
+## Quick Start
+
+### Prerequisites
+- **C++**: C++14 or later with OpenMP support
+- **Python**: Python 3.7+ with Cython for C++ binding
+- **Dependencies**: NumPy, Matplotlib (optional for visualization)
+
+### Installation
+
+
+### Usage
+
 
 ## Features
 
@@ -9,7 +22,7 @@ A high-performance global routing implementation for VLSI design, featuring adva
 - **Pattern Routing**: Initial routing with L-shape and Z-shape patterns
 - **Layer Assignment**: Multi-layer routing with via optimization
 - **Visualization Tools**: PPM format output with congestion color coding
-- **Performance Optimization**: Adaptive parallelization and SIMD optimizations
+- **Cross-Platform Support**: Compatible with different operating systems and compilers
 
 ## License
 
