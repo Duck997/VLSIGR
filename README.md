@@ -1,4 +1,4 @@
-# High-Performance VLSI Global Router with Adaptive Algorithm Design
+# VLSIGR
 
 A high-performance VLSI global router implementation that incorporates adaptive algorithms and intelligent scoring mechanisms to achieve competitive routing quality in integrated circuit design.
 
