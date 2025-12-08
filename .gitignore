@@ -1,0 +1,33 @@
+# Build directories
+build/
+cmake-build*/
+
+# Compiled objects/binaries
+*.o
+*.obj
+*.d
+*.exe
+*.out
+*.a
+*.so
+*.dll
+router
+draw.exe
+
+# Logs and temps
+*.log
+*.tmp
+*.cache
+*.swp
+*.swo
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE/editor
+.vscode/
+.idea/
+.DS_Store
+
+

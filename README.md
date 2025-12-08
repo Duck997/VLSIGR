@@ -5,7 +5,7 @@ A high-performance VLSI global router implementation that incorporates adaptive 
 ## Quick Start
 
 ### Prerequisites
-- **C++**: C++14 or later with OpenMP support
+- **C++**: C++17 or later (multi-threading via header-only [progschj/ThreadPool](https://github.com/progschj/ThreadPool))
 - **Python**: Python 3.7+ with Cython for C++ binding
 - **Dependencies**: NumPy, Matplotlib (optional for visualization)
 
@@ -36,6 +36,9 @@ This project contains code from multiple sources:
 - **LayerAssignment Module**: Copyright (c) 2013 by Wen-Hao Liu and Yih-Lang Li
   - URL: http://cs.nycu.edu.tw/~whliu/NCTU-GR.htm
   - License: Academic research use only
+- **ThreadPool**: Header-only C++11 thread pool by Jakob Progsch
+  - URL: https://github.com/progschj/ThreadPool
+  - License: zlib license
 
 ### Academic Use
 This project is intended for academic and educational purposes only.
@@ -47,6 +50,7 @@ This project is intended for academic and educational purposes only.
 3. W.-H. Liu, W.-C. Kao, Y.-L. Li, and K.-Y. Chao. "NCTU-GR 2.0: Multithreaded Collision-Aware Global Routing With Bounded-Length Maze Routing." IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems, vol. 32, no. 5, pp. 709-722, May 2013. DOI: 10.1109/TCAD.2012.2235124
 4. VLSI Physical Design Automation: Theory and Practice. Sait, Sadiq M., and Youssef, Habib.
 5. Global Routing in VLSI Design. Cong, Jason, and Shinnerl, Joseph R.
+6. Jakob Progsch. "ThreadPool" (C++11 thread pool), https://github.com/progschj/ThreadPool (zlib license).
 
 ## Author
 
