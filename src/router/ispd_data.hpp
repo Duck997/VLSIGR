@@ -9,11 +9,16 @@ namespace vlsigr {
 
 struct Point {
     int x = 0, y = 0, z = 0;
+    Point() = default;
+    Point(int x_, int y_, int z_ = 0): x(x_), y(y_), z(z_) {}
 };
 
 struct RPoint {
     int x = 0, y = 0, z = 0;
     bool hori = false;
+    RPoint() = default;
+    RPoint(int x_, int y_, bool h): x(x_), y(y_), z(0), hori(h) {}
+    RPoint(int x_, int y_, int z_, bool h): x(x_), y(y_), z(z_), hori(h) {}
 };
 
 struct TwoPin {
