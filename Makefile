@@ -2,6 +2,11 @@ CXX := g++
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -I./src
 LDFLAGS := 
 
+# Enable debug logging with `make Debug=1`
+ifeq ($(Debug),1)
+  CXXFLAGS += -DROUTER_DEBUG
+endif
+
 SRC_DIR := src
 ROUTER_DIR := $(SRC_DIR)/router
 BIN := router

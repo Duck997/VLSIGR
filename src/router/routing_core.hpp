@@ -1,6 +1,8 @@
 #pragma once
 
 #include <functional>
+#include <queue>
+#include <vector>
 
 #include "router/ispd_data.hpp"
 #include "router/grid_graph.hpp"
@@ -40,6 +42,10 @@ public:
     void route_pipeline(IspdData& data);
 
 private:
+    // Flow steps
+    void construct_2D_grid_graph(IspdData& data);
+    void net_decomposition(IspdData& data);
+
     GridGraph<Edge> grid_;
     CostModel cost_model_{0};
     int selcost_ = 0;
@@ -57,6 +63,13 @@ private:
     double score_twopin(const TwoPin& tp) const;
     double score_net(const Net& net) const;
     int hpwl(const TwoPin& tp) const;
+    void refine_wirelength(IspdData& data, const std::function<void(TwoPin&)>& route_func, int iter);
+
+    // Cost maintenance helpers (align with legacy GlobalRouting)
+    void del_cost(TwoPin& tp);
+    void del_cost(Net& net);
+    void add_cost(TwoPin& tp);
+    void add_cost(Net& net);
 };
 
 }  // namespace vlsigr

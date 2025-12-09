@@ -107,7 +107,13 @@ void HUM(TwoPin& tp, GridGraph<Edge>& grid, CostModel& cm, std::size_t width, st
                 rp.hori ? cntH++ : cntV++;
         }
         int d = BASE_EXPAND;
-        if (cntV != cntH ? cntV > cntH : tp.reroute % 2) {
+        bool expandH = (cntV != cntH ? cntV > cntH : tp.reroute % 2);  // more V overflow -> expand horizontally
+        // if already spanning full width, force vertical expansion
+        if (box.width() >= width) expandH = false;
+        // if already spanning full height, force horizontal expansion
+        if (box.height() >= height) expandH = true;
+
+        if (expandH) {
             if (box.eL) box.L = std::max(0, box.L - d);
             if (box.eR) box.R = std::min((int)width - 1, box.R + d);
         } else {
