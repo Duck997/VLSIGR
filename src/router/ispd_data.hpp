@@ -24,7 +24,8 @@ struct RPoint {
 struct TwoPin {
     Point from, to;
     std::vector<RPoint> path;
-    int reroute = 0;  // track how many times this twopin has been rerouted
+    int reroute = 0;   // track how many times this twopin has been rerouted
+    bool overflow = false;
 };
 
 struct Net {
@@ -36,6 +37,12 @@ struct Net {
     std::vector<Point> pin2D;
     std::vector<Point> pin3D;
     std::vector<TwoPin> twopin;
+
+    // stats
+    int overflow = 0;
+    int overflow_twopin = 0;
+    int wlen = 0;
+    double cost = 0.0;
 };
 
 struct CapacityAdj {

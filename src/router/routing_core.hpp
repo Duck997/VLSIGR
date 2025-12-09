@@ -30,6 +30,8 @@ private:
     void ripup(TwoPin& tp);
     bool twopin_overflow(const TwoPin& tp) const;
     void route_twopin(TwoPin& tp);
+    void mark_overflow(IspdData& data);
+    void sort_twopins(IspdData& data);
 };
 
 }  // namespace vlsigr

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <cmath>
 
 #include "router/patterns.hpp"
 #include "router/utils.hpp"
@@ -59,6 +60,54 @@ void RoutingCore::preroute(IspdData& data) {
     }
 }
 
+void RoutingCore::mark_overflow(IspdData& data) {
+    // reset stats
+    for (auto& net : data.nets) {
+        net.overflow = 0;
+        net.overflow_twopin = 0;
+        net.wlen = 0;
+        net.cost = 0.0;
+        for (auto& tp : net.twopin) tp.overflow = false;
+    }
+
+    // temp used accumulation like legacy
+    for (auto& net : data.nets) {
+        for (auto& tp : net.twopin) {
+            for (auto& rp : tp.path) {
+                auto& e = grid_.at(rp.x, rp.y, rp.hori);
+                e.used += 1;
+                if (e.used == 1) net.wlen++;
+                if (e.overflow()) {
+                    tp.overflow = true;
+                    if (e.used == 1) {
+                        net.cost += cost_model_.calc_cost(e);
+                        net.overflow++;
+                    }
+                }
+            }
+            if (tp.overflow) net.overflow_twopin++;
+        }
+    }
+    // rollback used
+    for (auto& net : data.nets)
+        for (auto& tp : net.twopin)
+            for (auto& rp : tp.path)
+                grid_.at(rp.x, rp.y, rp.hori).used -= 1;
+}
+
+void RoutingCore::sort_twopins(IspdData& data) {
+    for (auto& net : data.nets) {
+        std::sort(net.twopin.begin(), net.twopin.end(), [](const TwoPin& a, const TwoPin& b) {
+            // overflow first, then longer HPWL first
+            auto hpwl = [](const TwoPin& t) {
+                return std::abs(t.from.x - t.to.x) + std::abs(t.from.y - t.to.y);
+            };
+            if (a.overflow != b.overflow) return a.overflow > b.overflow;
+            return hpwl(a) > hpwl(b);
+        });
+    }
+}
+
 void RoutingCore::place(TwoPin& tp) {
     for (auto& rp : tp.path) {
         auto& e = grid_.at(rp.x, rp.y, rp.hori);
@@ -104,6 +153,8 @@ int RoutingCore::check_overflow() const {
 }
 
 void RoutingCore::ripup_place_once(IspdData& data) {
+    mark_overflow(data);
+    sort_twopins(data);
     // Mark overflowed twopins
     for (auto& net : data.nets) {
         for (auto& tp : net.twopin) {
