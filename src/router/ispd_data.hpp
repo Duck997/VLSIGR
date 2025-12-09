@@ -24,6 +24,7 @@ struct RPoint {
 struct TwoPin {
     Point from, to;
     std::vector<RPoint> path;
+    int reroute = 0;  // track how many times this twopin has been rerouted
 };
 
 struct Net {

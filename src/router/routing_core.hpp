@@ -17,9 +17,19 @@ public:
     GridGraph<Edge>& grid() { return grid_; }
     const GridGraph<Edge>& grid() const { return grid_; }
 
+    // Single pass: find overflowed twopins, ripup, reroute (monotonic), place, rebuild cost.
+    void ripup_place_once(IspdData& data);
+    // Compute total overflow (sum of (demand - cap) over edges, clamped at >0).
+    int check_overflow() const;
+
 private:
     GridGraph<Edge> grid_;
     CostModel cost_model_{0};
+
+    void place(TwoPin& tp);
+    void ripup(TwoPin& tp);
+    bool twopin_overflow(const TwoPin& tp) const;
+    void route_twopin(TwoPin& tp);
 };
 
 }  // namespace vlsigr
