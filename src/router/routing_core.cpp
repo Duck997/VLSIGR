@@ -124,15 +124,33 @@ bool RoutingCore::twopin_overflow(const TwoPin& tp) const {
     return false;
 }
 
-void RoutingCore::route_twopin(TwoPin& tp) {
+void RoutingCore::route_twopin_monotonic(TwoPin& tp) {
     auto cost_fn = [&](int x, int y, bool hori) {
         return cost_model_.calc_cost(grid_.at(x, y, hori));
     };
-    // Use HUM for overflow-prone twopins when selcost is aggressive
+    patterns::Monotonic(tp, cost_fn);
+}
+
+void RoutingCore::route_twopin_lshape(TwoPin& tp) {
+    patterns::Lshape(tp);
+}
+
+void RoutingCore::route_twopin_zshape(TwoPin& tp) {
+    auto cost_fn = [&](int x, int y, bool hori) {
+        return cost_model_.calc_cost(grid_.at(x, y, hori));
+    };
+    patterns::Zshape(tp, cost_fn);
+}
+
+void RoutingCore::route_twopin_hum(TwoPin& tp) {
+    hum::HUM(tp, grid_, cost_model_, grid_.width(), grid_.height());
+}
+
+void RoutingCore::route_twopin_default(TwoPin& tp) {
     if (tp.overflow || selcost_ == 2) {
-        hum::HUM(tp, grid_, cost_model_, grid_.width(), grid_.height());
+        route_twopin_hum(tp);
     } else {
-        patterns::Monotonic(tp, cost_fn);
+        route_twopin_monotonic(tp);
     }
 }
 
@@ -159,6 +177,23 @@ RoutingCore::OverflowStats RoutingCore::check_overflow(IspdData& data) {
             }
         }
     }
+    // also propagate overflow flags to twopins/nets for sorting in next iteration
+    for (auto& net : data.nets) {
+        net.overflow = 0;
+        net.overflow_twopin = 0;
+        for (auto& tp : net.twopin) {
+            tp.overflow = false;
+            for (auto& rp : tp.path) {
+                const auto& e = grid_.at(rp.x, rp.y, rp.hori);
+                if (e.overflow()) {
+                    tp.overflow = true;
+                    break;
+                }
+            }
+            if (tp.overflow) net.overflow_twopin++;
+        }
+    }
+
     for (auto& net : data.nets)
         for (auto& tp : net.twopin)
             for (auto& rp : tp.path)
@@ -167,7 +202,7 @@ RoutingCore::OverflowStats RoutingCore::check_overflow(IspdData& data) {
     return st;
 }
 
-void RoutingCore::ripup_place_once(IspdData& data) {
+void RoutingCore::ripup_place_once(IspdData& data, const std::function<void(TwoPin&)>& route_func) {
     mark_overflow(data);
     sort_twopins(data);
     // Mark overflowed twopins
@@ -175,7 +210,8 @@ void RoutingCore::ripup_place_once(IspdData& data) {
         for (auto& tp : net.twopin) {
             if (twopin_overflow(tp)) {
                 ripup(tp);
-                route_twopin(tp);
+                if (route_func) route_func(tp);
+                else route_twopin_default(tp);
                 place(tp);
             }
         }
@@ -183,15 +219,28 @@ void RoutingCore::ripup_place_once(IspdData& data) {
     cost_model_.build_cost(grid_);
 }
 
-void RoutingCore::route_iterate(IspdData& data, int max_iter) {
+void RoutingCore::route_iterate(IspdData& data, int max_iter,
+                                const std::function<void(TwoPin&)>& route_func) {
     int prev_of = std::numeric_limits<int>::max();
     for (int i = 0; i < max_iter; i++) {
-        ripup_place_once(data);
+        ripup_place_once(data, route_func);
         auto st = check_overflow(data);
         if (st.tot == 0) break;
         if (st.tot >= prev_of) break;  // no improvement
         prev_of = st.tot;
     }
+}
+
+void RoutingCore::route_pipeline(IspdData& data) {
+    // Phase 1: Z-shape refinement (light selcost)
+    set_selcost(0);
+    route_iterate(data, 3, [&](TwoPin& tp){ route_twopin_zshape(tp); });
+    // Phase 2: Monotonic with higher selcost
+    set_selcost(1);
+    route_iterate(data, 5, [&](TwoPin& tp){ route_twopin_monotonic(tp); });
+    // Phase 3: HUM aggressive
+    set_selcost(2);
+    route_iterate(data, 10, [&](TwoPin& tp){ route_twopin_hum(tp); });
 }
 
 int RoutingCore::hpwl(const TwoPin& tp) const {

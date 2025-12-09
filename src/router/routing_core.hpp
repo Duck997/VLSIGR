@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "router/ispd_data.hpp"
 #include "router/grid_graph.hpp"
 #include "router/cost_model.hpp"
@@ -18,7 +20,7 @@ public:
     const GridGraph<Edge>& grid() const { return grid_; }
 
     // Single pass: find overflowed twopins, ripup, reroute, place, rebuild cost.
-    void ripup_place_once(IspdData& data);
+    void ripup_place_once(IspdData& data, const std::function<void(TwoPin&)>& route_func);
 
     struct OverflowStats {
         int tot = 0;
@@ -31,7 +33,11 @@ public:
     void set_selcost(int sel) { selcost_ = sel; cost_model_.set_selcost(sel); }
 
     // Multi-iteration routing loop (simple): run ripup_place_once until overflow not decreasing or iter cap.
-    void route_iterate(IspdData& data, int max_iter = 10);
+    void route_iterate(IspdData& data, int max_iter = 10,
+                       const std::function<void(TwoPin&)>& route_func = {});
+
+    // Multi-stage pipeline (approximate legacy): Zshape -> Monotonic -> HUM
+    void route_pipeline(IspdData& data);
 
 private:
     GridGraph<Edge> grid_;
@@ -41,7 +47,11 @@ private:
     void place(TwoPin& tp);
     void ripup(TwoPin& tp);
     bool twopin_overflow(const TwoPin& tp) const;
-    void route_twopin(TwoPin& tp);
+    void route_twopin_default(TwoPin& tp);
+    void route_twopin_monotonic(TwoPin& tp);
+    void route_twopin_lshape(TwoPin& tp);
+    void route_twopin_zshape(TwoPin& tp);
+    void route_twopin_hum(TwoPin& tp);
     void mark_overflow(IspdData& data);
     void sort_twopins(IspdData& data);
     double score_twopin(const TwoPin& tp) const;
