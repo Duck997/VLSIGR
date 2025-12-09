@@ -42,6 +42,9 @@ net0 0 2 1
     int dx = std::abs(tp.from.x - tp.to.x);
     int dy = std::abs(tp.from.y - tp.to.y);
     EXPECT_EQ(tp.path.size(), static_cast<size_t>(dx + dy));
+
+    // check_overflow should be zero
+    EXPECT_EQ(rc.check_overflow(), 0);
 }
 
 
