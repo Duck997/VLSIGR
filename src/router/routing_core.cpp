@@ -6,14 +6,18 @@
 #include <functional>
 
 #include "router/patterns.hpp"
+#include "router/hum.hpp"
 #include "router/utils.hpp"
 
 namespace vlsigr {
 
 void RoutingCore::preroute(IspdData& data) {
-    // Build grid capacities (sum layers for a simple 2D model)
-    int vert_cap = std::accumulate(data.verticalCapacity.begin(), data.verticalCapacity.end(), 0);
-    int hori_cap = std::accumulate(data.horizontalCapacity.begin(), data.horizontalCapacity.end(), 0);
+    // Build grid capacities (sum layers for a simple 2D model), scaled by min_net like legacy
+    int min_w = average(data.minimumWidth);
+    int min_s = average(data.minimumSpacing);
+    int min_net = std::max(1, min_w + min_s);
+    int vert_cap = std::accumulate(data.verticalCapacity.begin(), data.verticalCapacity.end(), 0) / min_net;
+    int hori_cap = std::accumulate(data.horizontalCapacity.begin(), data.horizontalCapacity.end(), 0) / min_net;
     grid_.init((size_t)data.numXGrid, (size_t)data.numYGrid, Edge(vert_cap), Edge(hori_cap));
     // Apply capacity adjustments from input (reduce capacity on specific edges)
     for (auto& adj : data.capacityAdjs) {
@@ -27,7 +31,7 @@ void RoutingCore::preroute(IspdData& data) {
         if (dx + dy != 1) continue;  // only adjacent grids
         bool hori = dx == 1;
         int layerCap = (hori ? data.horizontalCapacity : data.verticalCapacity)[z];
-        int reduce = layerCap - adj.reducedCapacityLevel;
+        int reduce = (layerCap - adj.reducedCapacityLevel) / min_net;
         auto& e = grid_.at(lx, ly, hori);
         e.cap = std::max(0, e.cap - reduce);
     }
@@ -124,20 +128,43 @@ void RoutingCore::route_twopin(TwoPin& tp) {
     auto cost_fn = [&](int x, int y, bool hori) {
         return cost_model_.calc_cost(grid_.at(x, y, hori));
     };
-    patterns::Monotonic(tp, cost_fn);
+    // Use HUM for overflow-prone twopins when selcost is aggressive
+    if (tp.overflow || selcost_ == 2) {
+        hum::HUM(tp, grid_, cost_model_, grid_.width(), grid_.height());
+    } else {
+        patterns::Monotonic(tp, cost_fn);
+    }
 }
 
-int RoutingCore::check_overflow() const {
-    int tot = 0;
+RoutingCore::OverflowStats RoutingCore::check_overflow(IspdData& data) {
+    OverflowStats st;
+    // compute edge overflow stats and update history
     for (auto it = grid_.begin(); it != grid_.end(); ++it) {
         if (it->overflow()) {
             int of = it->demand - it->cap;
-            tot += of;
+            st.tot += of;
+            st.mx = std::max(st.mx, of);
             const_cast<Edge&>(*it).he += of;  // update history
             const_cast<Edge&>(*it).of = 0;
         }
     }
-    return tot;
+    // wirelength: count unique edges used
+    int wl = 0;
+    for (auto& net : data.nets) {
+        for (auto& tp : net.twopin) {
+            for (auto& rp : tp.path) {
+                auto& e = grid_.at(rp.x, rp.y, rp.hori);
+                bool first = (e.used++ == 0);
+                if (first) wl++;
+            }
+        }
+    }
+    for (auto& net : data.nets)
+        for (auto& tp : net.twopin)
+            for (auto& rp : tp.path)
+                grid_.at(rp.x, rp.y, rp.hori).used--;
+    st.wl = wl;
+    return st;
 }
 
 void RoutingCore::ripup_place_once(IspdData& data) {
@@ -154,6 +181,17 @@ void RoutingCore::ripup_place_once(IspdData& data) {
         }
     }
     cost_model_.build_cost(grid_);
+}
+
+void RoutingCore::route_iterate(IspdData& data, int max_iter) {
+    int prev_of = std::numeric_limits<int>::max();
+    for (int i = 0; i < max_iter; i++) {
+        ripup_place_once(data);
+        auto st = check_overflow(data);
+        if (st.tot == 0) break;
+        if (st.tot >= prev_of) break;  // no improvement
+        prev_of = st.tot;
+    }
 }
 
 int RoutingCore::hpwl(const TwoPin& tp) const {

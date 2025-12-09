@@ -17,12 +17,21 @@ public:
     GridGraph<Edge>& grid() { return grid_; }
     const GridGraph<Edge>& grid() const { return grid_; }
 
-    // Single pass: find overflowed twopins, ripup, reroute (monotonic), place, rebuild cost.
+    // Single pass: find overflowed twopins, ripup, reroute, place, rebuild cost.
     void ripup_place_once(IspdData& data);
-    // Compute total overflow (sum of (demand - cap) over edges, clamped at >0).
-    int check_overflow() const;
+
+    struct OverflowStats {
+        int tot = 0;
+        int mx = 0;
+        int wl = 0;
+    };
+    // Compute overflow stats and update history.
+    OverflowStats check_overflow(IspdData& data);
 
     void set_selcost(int sel) { selcost_ = sel; cost_model_.set_selcost(sel); }
+
+    // Multi-iteration routing loop (simple): run ripup_place_once until overflow not decreasing or iter cap.
+    void route_iterate(IspdData& data, int max_iter = 10);
 
 private:
     GridGraph<Edge> grid_;

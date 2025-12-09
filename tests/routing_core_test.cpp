@@ -31,8 +31,9 @@ net0 0 2 1
     // Grid dimensions and capacities built
     EXPECT_EQ(rc.grid().width(), 3u);
     EXPECT_EQ(rc.grid().height(), 2u);
-    EXPECT_EQ(rc.grid().at(0, 0, false).cap, 10); // vertical cap sum
-    EXPECT_EQ(rc.grid().at(0, 0, true).cap, 20);  // horizontal cap sum
+    // capacities are scaled by min_net (min_width+min_spacing)=2
+    EXPECT_EQ(rc.grid().at(0, 0, false).cap, 10/2); // vertical cap sum scaled
+    EXPECT_EQ(rc.grid().at(0, 0, true).cap, 20/2);  // horizontal cap sum scaled
 
     ASSERT_EQ(data.nets.size(), 1u);
     const auto& net = data.nets[0];
@@ -44,7 +45,7 @@ net0 0 2 1
     EXPECT_EQ(tp.path.size(), static_cast<size_t>(dx + dy));
 
     // check_overflow should be zero
-    EXPECT_EQ(rc.check_overflow(), 0);
+    EXPECT_EQ(rc.check_overflow(data).tot, 0);
 }
 
 
