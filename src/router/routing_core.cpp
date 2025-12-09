@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <functional>
 
 #include "router/patterns.hpp"
 #include "router/utils.hpp"
@@ -95,19 +96,6 @@ void RoutingCore::mark_overflow(IspdData& data) {
                 grid_.at(rp.x, rp.y, rp.hori).used -= 1;
 }
 
-void RoutingCore::sort_twopins(IspdData& data) {
-    for (auto& net : data.nets) {
-        std::sort(net.twopin.begin(), net.twopin.end(), [](const TwoPin& a, const TwoPin& b) {
-            // overflow first, then longer HPWL first
-            auto hpwl = [](const TwoPin& t) {
-                return std::abs(t.from.x - t.to.x) + std::abs(t.from.y - t.to.y);
-            };
-            if (a.overflow != b.overflow) return a.overflow > b.overflow;
-            return hpwl(a) > hpwl(b);
-        });
-    }
-}
-
 void RoutingCore::place(TwoPin& tp) {
     for (auto& rp : tp.path) {
         auto& e = grid_.at(rp.x, rp.y, rp.hori);
@@ -166,6 +154,43 @@ void RoutingCore::ripup_place_once(IspdData& data) {
         }
     }
     cost_model_.build_cost(grid_);
+}
+
+int RoutingCore::hpwl(const TwoPin& tp) const {
+    return std::abs(tp.from.x - tp.to.x) + std::abs(tp.from.y - tp.to.y);
+}
+
+double RoutingCore::score_twopin(const TwoPin& tp) const {
+    int dx = 1 + std::abs(tp.from.x - tp.to.x);
+    int dy = 1 + std::abs(tp.from.y - tp.to.y);
+    if (selcost_ == 2) {
+        return 60.0 * (tp.overflow ? 1.0 : 0.0) + 1.0 * (int)tp.path.size();
+    }
+    if (selcost_ == 1) {
+        return 60.0 * (tp.overflow ? 1.0 : 0.0) + (dx * dy);
+    }
+    return 100.0 / std::max(dx, dy);
+}
+
+double RoutingCore::score_net(const Net& net) const {
+    double cost = net.cost <= 0 ? 1.0 : net.cost;
+    return 10.0 * net.overflow + net.overflow_twopin + 3.0 * std::log2(cost);
+}
+
+void RoutingCore::sort_twopins(IspdData& data) {
+    // sort nets by descending score
+    std::sort(data.nets.begin(), data.nets.end(), [&](const Net& a, const Net& b) {
+        return score_net(a) > score_net(b);
+    });
+    // sort twopins inside each net (ascending score, then smaller HPWL)
+    for (auto& net : data.nets) {
+        std::sort(net.twopin.begin(), net.twopin.end(), [&](const TwoPin& a, const TwoPin& b) {
+            double sa = score_twopin(a);
+            double sb = score_twopin(b);
+            if (sa != sb) return sa < sb;
+            return hpwl(a) < hpwl(b);
+        });
+    }
 }
 
 }  // namespace vlsigr
