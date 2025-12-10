@@ -12,6 +12,7 @@ cmake-build*/
 *.so
 *.dll
 /router
+/gtest
 draw.exe
 
 # Logs and temps
