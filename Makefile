@@ -1,6 +1,6 @@
 CXX := g++
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -I./src -I./third_party
-LDFLAGS := 
+LDFLAGS := -pthread
 
 # Enable debug logging with `make Debug=1`
 ifeq ($(Debug),1)

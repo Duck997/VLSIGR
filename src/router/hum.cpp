@@ -5,6 +5,7 @@
 #include <optional>
 #include <vector>
 #include <array>
+#include <immintrin.h>  // for target("avx2") annotation
 
 #include "router/patterns.hpp"
 #include "router/utils.hpp"
@@ -13,14 +14,18 @@ namespace vlsigr::hum {
 
 namespace {
 
-// Strictly aligned with GlobalRouting::delta (lines 253-262)
+#if defined(__GNUC__)
+#define SIMD_AVX2 __attribute__((target("avx2")))
+#else
+#define SIMD_AVX2
+#endif
+
 inline int delta_from_reroute(int cnt) {
     if (cnt <= 2) return 5;
     if (cnt <= 6) return 20;
     return 15;
 }
 
-// Strictly aligned with GlobalRouting::Box (lines 77-85)
 struct Box {
     bool eL, eR, eB, eU;
     int L, R, B, U;
@@ -34,7 +39,6 @@ struct Box {
     Point UR() const { return Point(R, U, 0); }
 };
 
-// Strictly aligned with GlobalRouting::BoxCost (lines 87-112)
 struct BoxCost : Box {
     struct Data {
         double cost = INFINITY;
@@ -71,17 +75,18 @@ struct BoxCost : Box {
     }
 };
 
-// CRITICAL: Use cached edge.cost, NOT recompute! (aligned with GlobalRouting::cost)
+// Use cached edge.cost, do not recompute here
 inline double edge_cost(CostModel& /* cm */, GridGraph<Edge>& grid, int x, int y, bool hori) {
     return grid.at(x, y, hori).cost;  // Use cached cost, do NOT calc_cost!
 }
 
-// Strictly aligned with GlobalRouting::calcX (lines 396-413)
-inline void calcX(BoxCost& box, int y, int bx, int ex,
-                  CostModel& cm, GridGraph<Edge>& grid) {
+SIMD_AVX2 inline void calcX(BoxCost& box, int y, int bx, int ex,
+                            CostModel& cm, GridGraph<Edge>& grid) {
     auto dx = sign(ex - bx);
     if (dx == 0) return;
     auto pc = box(bx, y).cost;
+    // SIMD-friendly linear scan; avoid branches to help vectorization
+    #pragma GCC ivdep
     for (auto px = bx, x = px + dx; x != ex + dx; px = x, x += dx) {
         auto cc = pc + edge_cost(cm, grid, std::min(x, px), y, true);
         auto& data = box(x, y);
@@ -95,12 +100,13 @@ inline void calcX(BoxCost& box, int y, int bx, int ex,
     }
 }
 
-// Strictly aligned with GlobalRouting::calcY (lines 415-432)
-inline void calcY(BoxCost& box, int x, int by, int ey,
-                  CostModel& cm, GridGraph<Edge>& grid) {
+SIMD_AVX2 inline void calcY(BoxCost& box, int x, int by, int ey,
+                            CostModel& cm, GridGraph<Edge>& grid) {
     auto dy = sign(ey - by);
     if (dy == 0) return;
     auto pc = box(x, by).cost;
+    // SIMD-friendly linear scan; avoid branches to help vectorization
+    #pragma GCC ivdep
     for (auto py = by, y = py + dy; y != ey + dy; py = y, y += dy) {
         auto cc = pc + edge_cost(cm, grid, x, std::min(y, py), false);
         auto& data = box(x, y);
@@ -114,7 +120,6 @@ inline void calcY(BoxCost& box, int x, int by, int ey,
     }
 }
 
-// Strictly aligned with GlobalRouting::VMR_impl (lines 470-488)
 void VMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& grid) {
     box(f).cost = 0;
     box(f).from = std::nullopt;
@@ -122,6 +127,8 @@ void VMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& gr
     calcX(box, f.y, box.R, box.L, cm, grid);
     auto dy = sign(t.y - f.y);
     for (auto py = f.y, y = py + dy; y != t.y + dy; py = y, y += dy) {
+        // Hint compiler to vectorize inner loop
+        #pragma GCC ivdep
         for (auto x = box.L; x <= box.R; x++) {
             box(x, y).cost = box(x, py).cost + edge_cost(cm, grid, x, std::min(y, py), false);
             box(x, y).from = Point(x, py, 0);
@@ -131,7 +138,6 @@ void VMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& gr
     }
 }
 
-// Strictly aligned with GlobalRouting::HMR_impl (lines 490-508)
 void HMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& grid) {
     box(f).cost = 0;
     box(f).from = std::nullopt;
@@ -139,6 +145,8 @@ void HMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& gr
     calcY(box, f.x, box.U, box.B, cm, grid);
     auto dx = sign(t.x - f.x);
     for (auto px = f.x, x = px + dx; x != t.x + dx; px = x, x += dx) {
+        // Hint compiler to vectorize inner loop
+        #pragma GCC ivdep
         for (auto y = box.B; y <= box.U; y++) {
             box(x, y).cost = box(px, y).cost + edge_cost(cm, grid, std::min(x, px), y, true);
             box(x, y).from = Point(px, y, 0);
@@ -150,7 +158,6 @@ void HMR_impl(Point f, Point t, BoxCost& box, CostModel& cm, GridGraph<Edge>& gr
 
 }  // namespace
 
-// Strictly aligned with GlobalRouting::HUM serial version (lines 510-704)
 void HUM(TwoPin& tp, GridGraph<Edge>& grid, CostModel& cm, std::size_t width, std::size_t height) {
     bool insert = false;
     if (tp.box == nullptr) {
@@ -159,8 +166,8 @@ void HUM(TwoPin& tp, GridGraph<Edge>& grid, CostModel& cm, std::size_t width, st
     }
     auto& box = *(Box*)tp.box;
 
-    // Congestion-aware Bounding Box Expansion (lines 519-540)
-    if (insert || true) {  // always expand, matching GlobalRouting line 519
+    // Congestion-aware bounding box expansion
+    if (insert || true) {  // always expand (legacy behavior)
         std::array<int, 2> CntOE{0, 0};
         for (auto& rp : tp.path)
             if (grid.at(rp.x, rp.y, rp.hori).overflow())
@@ -169,7 +176,7 @@ void HUM(TwoPin& tp, GridGraph<Edge>& grid, CostModel& cm, std::size_t width, st
         auto d = delta_from_reroute(tp.reroute);
         auto cV = CntOE[0], cH = CntOE[1];
         
-        // line 530: auto lr = cV != cH ? cV > cH : randint(2);
+        // Choose expand direction based on overflow counts (vertical vs horizontal)
         auto lr = (cV != cH) ? (cV > cH) : (vlsigr::randint(2) != 0);
         
         // lines 532-540

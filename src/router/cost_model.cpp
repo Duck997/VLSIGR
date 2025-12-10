@@ -1,4 +1,6 @@
 #include "cost_model.hpp"
+#include "router/thread_pool.hpp"
+#include <immintrin.h>  // for target attribute if compiler uses it
 
 namespace vlsigr {
 

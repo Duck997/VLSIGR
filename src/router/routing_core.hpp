@@ -32,7 +32,7 @@ public:
     RoutingCore();
     ~RoutingCore();
 
-    // Main routing entry (aligned with GlobalRouting::route, line 865)
+    // Main routing entry
     void route(IspdData& data, bool leave = false);
     
     // Core routing functions
