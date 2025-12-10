@@ -21,22 +21,22 @@
 
 namespace vlsigr {
 
-// NetWrapper constructor (aligned with GlobalRouting::Net::Net, line 114-116)
+// NetWrapper constructor
 RoutingCore::NetWrapper::NetWrapper(Net* n)
     : overflow(0), overflow_twopin(0), wlen(0), reroute(0),
       score(0), cost(0), net(n), twopins{} {}
 
-// Constructor (aligned with GlobalRouting::GlobalRouting, line 281-297)
+// Constructor
 RoutingCore::RoutingCore()
     : width_(0), height_(0), min_width_(0), min_spacing_(0), min_net_(0), mx_cap_(0),
       selcost_(0), stop_(false), print_(true), ispdData_(nullptr) {}
 
-// Destructor (aligned with GlobalRouting::~GlobalRouting, line 299-301)
+// Destructor
 RoutingCore::~RoutingCore() {
     for (auto net : nets_) delete net;
 }
 
-// ripup (aligned with GlobalRouting::ripup, line 303-312)
+// ripup
 void RoutingCore::ripup(TwoPinPtr twopin) {
     if (twopin->ripup) return;
     twopin->ripup = true;
@@ -49,7 +49,7 @@ void RoutingCore::ripup(TwoPinPtr twopin) {
     }
 }
 
-// place (aligned with GlobalRouting::place, line 314-320)
+// place
 void RoutingCore::place(TwoPinPtr twopin) {
     if (!twopin->ripup) {
         std::cerr << "[WARNING] place called on non-ripup twopin!" << std::endl;
@@ -65,7 +65,7 @@ void RoutingCore::place(TwoPinPtr twopin) {
     }
 }
 
-// cost inline functions (aligned with GlobalRouting::cost, lines 118-145)
+// cost inline functions
 inline double RoutingCore::cost(const TwoPinPtr twopin) const {
     double c = 0;
     for (auto rp : twopin->path)
@@ -95,7 +95,7 @@ inline double RoutingCore::cost(const Edge& e) const {
     return e.cost;
 }
 
-// del_cost for net (aligned with GlobalRouting::del_cost(Net*), line 147-153)
+// del_cost for net
 void RoutingCore::del_cost(NetWrapper* net) {
     for (auto twopin : net->twopins)
         for (auto rp : twopin->path)
@@ -104,13 +104,13 @@ void RoutingCore::del_cost(NetWrapper* net) {
         del_cost(twopin);
 }
 
-// del_cost for twopin (aligned with GlobalRouting::del_cost(TwoPinPtr), line 155-158)
+// del_cost for twopin
 void RoutingCore::del_cost(TwoPinPtr twopin) {
     for (auto rp : twopin->path)
         getEdge(rp).cost = 1;
 }
 
-// add_cost for net (aligned with GlobalRouting::add_cost(Net*), line 160-166)
+// add_cost for net
 void RoutingCore::add_cost(NetWrapper* net) {
     for (auto twopin : net->twopins)
         for (auto rp : twopin->path)
@@ -119,7 +119,7 @@ void RoutingCore::add_cost(NetWrapper* net) {
         add_cost(twopin);
 }
 
-// add_cost for twopin (aligned with GlobalRouting::add_cost(TwoPinPtr), line 168-174)
+// add_cost for twopin
 void RoutingCore::add_cost(TwoPinPtr twopin) {
     for (auto rp : twopin->path) {
         auto& e = getEdge(rp);
@@ -128,12 +128,12 @@ void RoutingCore::add_cost(TwoPinPtr twopin) {
     }
 }
 
-// build_cost (aligned with GlobalRouting::build_cost, line 202-220)
+// build_cost
 void RoutingCore::build_cost() {
     cost_model_.build_cost(grid_);
 }
 
-// sort_twopins (aligned with GlobalRouting::sort_twopins, line 222-234)
+// sort_twopins
 void RoutingCore::sort_twopins() {
     std::sort(nets_.begin(), nets_.end(), [&](auto a, auto b) {
         auto sa = score(a);
@@ -150,7 +150,7 @@ void RoutingCore::sort_twopins() {
         });
 }
 
-// score for twopin (aligned with GlobalRouting::score(TwoPinPtr), line 236-247)
+// score for twopin
 inline double RoutingCore::score(const TwoPinPtr twopin) const {
     if (selcost_ == 2)
         return 60 * (twopin->overflow ? 1 : 0) + 1 * (int)twopin->path.size();
@@ -164,12 +164,12 @@ inline double RoutingCore::score(const TwoPinPtr twopin) const {
     return 100.0 / std::max(dx, dy);
 }
 
-// score for net (aligned with GlobalRouting::score(Net*), line 249-251)
+// score for net
 inline double RoutingCore::score(const NetWrapper* net) const {
     return 10 * net->overflow + net->overflow_twopin + 3 * std::log2(net->cost);
 }
 
-// delta (aligned with GlobalRouting::delta, line 253-262)
+// delta
 inline int RoutingCore::delta(const TwoPinPtr twopin) const {
     int cnt = twopin->reroute;
     if (cnt <= 2) return 5;
@@ -177,7 +177,7 @@ inline int RoutingCore::delta(const TwoPinPtr twopin) const {
     return 15;
 }
 
-// check_overflow (aligned with GlobalRouting::check_overflow, line 1049-1104)
+// check_overflow
 int RoutingCore::check_overflow() {
     int mxof = 0, totof = 0;
     
@@ -232,33 +232,33 @@ int RoutingCore::check_overflow() {
     return totof;
 }
 
-// Lshape (aligned with GlobalRouting::Lshape, line 322-363)
+// Lshape
 void RoutingCore::Lshape(TwoPinPtr twopin) {
     patterns::Lshape(*twopin, [&](int x, int y, bool hori) -> double {
         return cost(x, y, hori);
     });
 }
 
-// Zshape (aligned with GlobalRouting::Zshape, line 365-394)
+// Zshape
 void RoutingCore::Zshape(TwoPinPtr twopin) {
     patterns::Zshape(*twopin, [&](int x, int y, bool hori) -> double {
         return cost(x, y, hori);
     });
 }
 
-// monotonic (aligned with GlobalRouting::monotonic, line 434-468)
+// monotonic
 void RoutingCore::monotonic(TwoPinPtr twopin) {
     patterns::Monotonic(*twopin, [&](int x, int y, bool hori) -> double {
         return cost(x, y, hori);
     });
 }
 
-// HUM (aligned with GlobalRouting::HUM serial version, line 510-704)
+// HUM
 void RoutingCore::HUM(TwoPinPtr twopin) {
     hum::HUM(*twopin, grid_, cost_model_, width_, height_);
 }
 
-// ripup_place (aligned with GlobalRouting::ripup_place, line 1106-1139)
+// ripup_place
 void RoutingCore::ripup_place(FP fp) {
     sort_twopins();
     for (auto net : nets_) {
@@ -293,7 +293,7 @@ void RoutingCore::ripup_place(FP fp) {
     if (stop_) throw false;
 }
 
-// ripup_place_wl (aligned with GlobalRouting::ripup_place_wl, line 1142-1189)
+// ripup_place_wl
 void RoutingCore::ripup_place_wl(FP fp) {
     sort_twopins();
     for (auto net : nets_) {
@@ -341,7 +341,7 @@ void RoutingCore::ripup_place_wl(FP fp) {
     if (stop_) throw false;
 }
 
-// routing (aligned with GlobalRouting::routing, line 1191-1211)
+// routing
 void RoutingCore::routing(const char* name, FP fp, int iteration, int sel_cost) {
     selcost_ = sel_cost;
     cost_model_.set_selcost(sel_cost);
@@ -370,7 +370,7 @@ void RoutingCore::routing(const char* name, FP fp, int iteration, int sel_cost) 
     if (print_) std::cerr << name << " routing costs " << sec_since(start) << "s" << std::endl;
 }
 
-// refine_wirelength (aligned with GlobalRouting::refine_wirelength, line 1214-1232)
+// refine_wirelength
 void RoutingCore::refine_wirelength(const char* name, FP fp, int iteration, int sel_cost) {
     selcost_ = sel_cost;
     cost_model_.set_selcost(sel_cost);
@@ -391,7 +391,7 @@ void RoutingCore::refine_wirelength(const char* name, FP fp, int iteration, int 
     if (print_) std::cerr << name << " refine WL costs " << sec_since(start) << "s" << std::endl;
 }
 
-// preroute (aligned with GlobalRouting::preroute, line 1023-1047)
+// preroute
 void RoutingCore::preroute(IspdData& /* data */) {
     if (print_) std::cerr << "[*] preroute" << std::endl;
     auto start = std::chrono::steady_clock::now();
@@ -422,7 +422,7 @@ void RoutingCore::preroute(IspdData& /* data */) {
     check_overflow();
 }
 
-// construct_2D_grid_graph (aligned with GlobalRouting::construct_2D_grid_graph, line 917-963)
+// construct_2D_grid_graph
 void RoutingCore::construct_2D_grid_graph() {
     // Filter nets: remove nets with >1000 pins or <=1 2D pins
     ispdData_->nets.erase(
@@ -475,7 +475,7 @@ void RoutingCore::construct_2D_grid_graph() {
     }
 }
 
-// net_decomposition (aligned with GlobalRouting::net_decomposition, line 965-995)
+// net_decomposition
 void RoutingCore::net_decomposition() {
     for (auto& net : ispdData_->nets) {
         auto sz = net.pin2D.size();
@@ -508,7 +508,7 @@ void RoutingCore::net_decomposition() {
     }
 }
 
-// route (aligned with GlobalRouting::route, line 865-915)
+// route
 void RoutingCore::route(IspdData& data, bool leave) {
     ispdData_ = &data;
     width_ = (std::size_t)ispdData_->numXGrid;

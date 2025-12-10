@@ -2,8 +2,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <thread>
 
-#include "third_party/ThreadPool.h"
+#include "ThreadPool.h"
 
 namespace vlsigr {
 
