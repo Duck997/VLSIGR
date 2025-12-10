@@ -26,6 +26,8 @@ struct TwoPin {
     std::vector<RPoint> path;
     int reroute = 0;   // track how many times this twopin has been rerouted
     bool overflow = false;
+    bool ripup = false;
+    void* box = nullptr; // optional HUM bounding box storage
 };
 
 struct Net {

@@ -1,12 +1,18 @@
 CXX := g++
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -I./src
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -I./src -I./third_party
 LDFLAGS := 
+
+# Enable debug logging with `make Debug=1`
+ifeq ($(Debug),1)
+  CXXFLAGS += -DROUTER_DEBUG
+endif
 
 SRC_DIR := src
 ROUTER_DIR := $(SRC_DIR)/router
 BIN := router
 
-SRCS := $(SRC_DIR)/main.cpp $(wildcard $(ROUTER_DIR)/*.cpp)
+THIRD_PARTY := third_party/LayerAssignment.cpp
+SRCS := $(SRC_DIR)/main.cpp $(wildcard $(ROUTER_DIR)/*.cpp) $(THIRD_PARTY)
 OBJS := $(SRCS:.cpp=.o)
 
 TEST_BIN := gtest

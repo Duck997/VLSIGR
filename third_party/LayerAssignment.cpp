@@ -24,6 +24,10 @@
 // *********************************************************************************************************************
 
 #include "LayerAssignment.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #include <cmath>
 #include <climits>
 #include <algorithm>
@@ -913,6 +917,8 @@ void Graph::output3Dresult(const char *filename)
     }
     fclose(fp);
 }
+
+#pragma GCC diagnostic pop
 
 inline void Graph::getStraight(vector<Line> &lines, vector<Edge> &edgeArray, vector<Line> &tmpLines, vector<vector<int>> &tmpInfo) const
 {

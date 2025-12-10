@@ -2,285 +2,574 @@
 
 #include <algorithm>
 #include <numeric>
+#include <queue>
 #include <cmath>
-#include <functional>
+#include <limits>
+#include <iostream>
+#include <chrono>
 
 #include "router/patterns.hpp"
 #include "router/hum.hpp"
 #include "router/utils.hpp"
 
+// Debug macro (enabled by -DROUTER_DEBUG)
+#ifdef ROUTER_DEBUG
+#define dbg(...) std::cerr << __VA_ARGS__ << std::endl
+#else
+#define dbg(...) do {} while(0)
+#endif
+
 namespace vlsigr {
 
-void RoutingCore::preroute(IspdData& data) {
-    // Build grid capacities (sum layers for a simple 2D model), scaled by min_net like legacy
-    int min_w = average(data.minimumWidth);
-    int min_s = average(data.minimumSpacing);
-    int min_net = std::max(1, min_w + min_s);
-    int vert_cap = std::accumulate(data.verticalCapacity.begin(), data.verticalCapacity.end(), 0) / min_net;
-    int hori_cap = std::accumulate(data.horizontalCapacity.begin(), data.horizontalCapacity.end(), 0) / min_net;
-    grid_.init((size_t)data.numXGrid, (size_t)data.numYGrid, Edge(vert_cap), Edge(hori_cap));
-    // Apply capacity adjustments from input (reduce capacity on specific edges)
-    for (auto& adj : data.capacityAdjs) {
-        auto [x1, y1, z1] = adj.grid1;
-        auto [x2, y2, z2] = adj.grid2;
-        if (z1 != z2) continue;  // skip cross-layer
-        auto z = z1 - 1;
-        int lx = std::min(x1, x2), rx = std::max(x1, x2);
-        int ly = std::min(y1, y2), ry = std::max(y1, y2);
-        int dx = rx - lx, dy = ry - ly;
-        if (dx + dy != 1) continue;  // only adjacent grids
-        bool hori = dx == 1;
-        int layerCap = (hori ? data.horizontalCapacity : data.verticalCapacity)[z];
-        int reduce = (layerCap - adj.reducedCapacityLevel) / min_net;
-        auto& e = grid_.at(lx, ly, hori);
-        e.cap = std::max(0, e.cap - reduce);
-    }
-    cost_model_.build_cost(grid_);
+// NetWrapper constructor (aligned with GlobalRouting::Net::Net, line 114-116)
+RoutingCore::NetWrapper::NetWrapper(Net* n)
+    : overflow(0), overflow_twopin(0), wlen(0), reroute(0),
+      score(0), cost(0), net(n), twopins{} {}
 
-    // For now, do a trivial decomposition: pair consecutive pins into TwoPin
-    for (auto& net : data.nets) {
-        net.twopin.clear();
-        if (net.pins.size() < 2) continue;
-        // Convert to 2D pin list (grid coordinates) and dedup by (x,y)
-        net.pin2D.clear();
-        std::vector<std::pair<int,int>> seen;
-        for (auto& p : net.pins) {
-            int x = (std::get<0>(p) - data.lowerLeftX) / data.tileWidth;
-            int y = (std::get<1>(p) - data.lowerLeftY) / data.tileHeight;
-            int z = std::get<2>(p) - 1;
-            if (std::find(seen.begin(), seen.end(), std::make_pair(x, y)) != seen.end()) continue;
-            seen.emplace_back(x, y);
-            net.pin2D.push_back(Point(x, y, z));
-        }
-        if (net.pin2D.size() < 2) continue;  // ignore single-pin nets
-        // Simple chain: pin i -> pin i+1
-        for (size_t i = 0; i + 1 < net.pin2D.size(); ++i) {
-            TwoPin tp;
-            tp.from = net.pin2D[i];
-            tp.to   = net.pin2D[i+1];
-            patterns::Lshape(tp);  // unit-cost L-shape
-            place(tp);
-            net.twopin.push_back(std::move(tp));
-        }
+// Constructor (aligned with GlobalRouting::GlobalRouting, line 281-297)
+RoutingCore::RoutingCore()
+    : width_(0), height_(0), min_width_(0), min_spacing_(0), min_net_(0), mx_cap_(0),
+      selcost_(0), stop_(false), print_(true), ispdData_(nullptr) {}
+
+// Destructor (aligned with GlobalRouting::~GlobalRouting, line 299-301)
+RoutingCore::~RoutingCore() {
+    for (auto net : nets_) delete net;
+}
+
+// ripup (aligned with GlobalRouting::ripup, line 303-312)
+void RoutingCore::ripup(TwoPinPtr twopin) {
+    if (twopin->ripup) return;
+    twopin->ripup = true;
+    twopin->reroute++;
+    for (auto rp : twopin->path) {
+        auto& e = getEdge(rp);
+        bool zero = (e.used == 1);
+        if (zero) e.demand--;
+        e.used--;
     }
 }
 
-void RoutingCore::mark_overflow(IspdData& data) {
-    // reset stats
-    for (auto& net : data.nets) {
-        net.overflow = 0;
-        net.overflow_twopin = 0;
-        net.wlen = 0;
-        net.cost = 0.0;
-        for (auto& tp : net.twopin) tp.overflow = false;
+// place (aligned with GlobalRouting::place, line 314-320)
+void RoutingCore::place(TwoPinPtr twopin) {
+    if (!twopin->ripup) {
+        std::cerr << "[WARNING] place called on non-ripup twopin!" << std::endl;
+        return;
     }
-
-    // temp used accumulation like legacy
-    for (auto& net : data.nets) {
-        for (auto& tp : net.twopin) {
-            for (auto& rp : tp.path) {
-                auto& e = grid_.at(rp.x, rp.y, rp.hori);
-                e.used += 1;
-                if (e.used == 1) net.wlen++;
-                if (e.overflow()) {
-                    tp.overflow = true;
-                    if (e.used == 1) {
-                        net.cost += cost_model_.calc_cost(e);
-                        net.overflow++;
-                    }
-                }
-            }
-            if (tp.overflow) net.overflow_twopin++;
-        }
-    }
-    // rollback used
-    for (auto& net : data.nets)
-        for (auto& tp : net.twopin)
-            for (auto& rp : tp.path)
-                grid_.at(rp.x, rp.y, rp.hori).used -= 1;
-}
-
-void RoutingCore::place(TwoPin& tp) {
-    for (auto& rp : tp.path) {
-        auto& e = grid_.at(rp.x, rp.y, rp.hori);
-        e.demand += 1;
+    twopin->ripup = false;
+    for (auto rp : twopin->path) {
+        auto& e = getEdge(rp);
+        if (twopin->overflow) e.of++;
+        bool zero = (e.used == 0);
+        if (zero) e.demand++;
+        e.used++;
     }
 }
 
-void RoutingCore::ripup(TwoPin& tp) {
-    tp.reroute++;
-    for (auto& rp : tp.path) {
-        auto& e = grid_.at(rp.x, rp.y, rp.hori);
-        e.demand -= 1;
+// cost inline functions (aligned with GlobalRouting::cost, lines 118-145)
+inline double RoutingCore::cost(const TwoPinPtr twopin) const {
+    double c = 0;
+    for (auto rp : twopin->path)
+        c += cost(rp);
+    return c;
+}
+
+inline double RoutingCore::cost(Point f, Point t) const {
+    auto dx = std::abs(f.x - t.x);
+    auto dy = std::abs(f.y - t.y);
+    if (dx == 1 && dy == 0)
+        return cost(std::min(f.x, t.x), f.y, true);
+    if (dx == 0 && dy == 1)
+        return cost(f.x, std::min(f.y, t.y), false);
+    return INFINITY;
+}
+
+inline double RoutingCore::cost(RPoint rp) const {
+    return cost(getEdge(rp));
+}
+
+inline double RoutingCore::cost(int x, int y, bool hori) const {
+    return cost(getEdge(x, y, hori));
+}
+
+inline double RoutingCore::cost(const Edge& e) const {
+    return e.cost;
+}
+
+// del_cost for net (aligned with GlobalRouting::del_cost(Net*), line 147-153)
+void RoutingCore::del_cost(NetWrapper* net) {
+    for (auto twopin : net->twopins)
+        for (auto rp : twopin->path)
+            getEdge(rp).used++;
+    for (auto twopin : net->twopins)
+        del_cost(twopin);
+}
+
+// del_cost for twopin (aligned with GlobalRouting::del_cost(TwoPinPtr), line 155-158)
+void RoutingCore::del_cost(TwoPinPtr twopin) {
+    for (auto rp : twopin->path)
+        getEdge(rp).cost = 1;
+}
+
+// add_cost for net (aligned with GlobalRouting::add_cost(Net*), line 160-166)
+void RoutingCore::add_cost(NetWrapper* net) {
+    for (auto twopin : net->twopins)
+        for (auto rp : twopin->path)
+            getEdge(rp).used--;
+    for (auto twopin : net->twopins)
+        add_cost(twopin);
+}
+
+// add_cost for twopin (aligned with GlobalRouting::add_cost(TwoPinPtr), line 168-174)
+void RoutingCore::add_cost(TwoPinPtr twopin) {
+    for (auto rp : twopin->path) {
+        auto& e = getEdge(rp);
+        if (e.used == 0)
+            e.cost = cost_model_.calc_cost(e);
     }
-    tp.path.clear();
 }
 
-bool RoutingCore::twopin_overflow(const TwoPin& tp) const {
-    for (auto& rp : tp.path) {
-        const auto& e = grid_.at(rp.x, rp.y, rp.hori);
-        if (e.overflow()) return true;
-    }
-    return false;
-}
-
-void RoutingCore::route_twopin_monotonic(TwoPin& tp) {
-    auto cost_fn = [&](int x, int y, bool hori) {
-        return cost_model_.calc_cost(grid_.at(x, y, hori));
-    };
-    patterns::Monotonic(tp, cost_fn);
-}
-
-void RoutingCore::route_twopin_lshape(TwoPin& tp) {
-    patterns::Lshape(tp);
-}
-
-void RoutingCore::route_twopin_zshape(TwoPin& tp) {
-    auto cost_fn = [&](int x, int y, bool hori) {
-        return cost_model_.calc_cost(grid_.at(x, y, hori));
-    };
-    patterns::Zshape(tp, cost_fn);
-}
-
-void RoutingCore::route_twopin_hum(TwoPin& tp) {
-    hum::HUM(tp, grid_, cost_model_, grid_.width(), grid_.height());
-}
-
-void RoutingCore::route_twopin_default(TwoPin& tp) {
-    if (tp.overflow || selcost_ == 2) {
-        route_twopin_hum(tp);
-    } else {
-        route_twopin_monotonic(tp);
-    }
-}
-
-RoutingCore::OverflowStats RoutingCore::check_overflow(IspdData& data) {
-    OverflowStats st;
-    // compute edge overflow stats and update history
-    for (auto it = grid_.begin(); it != grid_.end(); ++it) {
-        if (it->overflow()) {
-            int of = it->demand - it->cap;
-            st.tot += of;
-            st.mx = std::max(st.mx, of);
-            const_cast<Edge&>(*it).he += of;  // update history
-            const_cast<Edge&>(*it).of = 0;
-        }
-    }
-    // wirelength: count unique edges used
-    int wl = 0;
-    for (auto& net : data.nets) {
-        for (auto& tp : net.twopin) {
-            for (auto& rp : tp.path) {
-                auto& e = grid_.at(rp.x, rp.y, rp.hori);
-                bool first = (e.used++ == 0);
-                if (first) wl++;
-            }
-        }
-    }
-    // also propagate overflow flags to twopins/nets for sorting in next iteration
-    for (auto& net : data.nets) {
-        net.overflow = 0;
-        net.overflow_twopin = 0;
-        for (auto& tp : net.twopin) {
-            tp.overflow = false;
-            for (auto& rp : tp.path) {
-                const auto& e = grid_.at(rp.x, rp.y, rp.hori);
-                if (e.overflow()) {
-                    tp.overflow = true;
-                    break;
-                }
-            }
-            if (tp.overflow) net.overflow_twopin++;
-        }
-    }
-
-    for (auto& net : data.nets)
-        for (auto& tp : net.twopin)
-            for (auto& rp : tp.path)
-                grid_.at(rp.x, rp.y, rp.hori).used--;
-    st.wl = wl;
-    return st;
-}
-
-void RoutingCore::ripup_place_once(IspdData& data, const std::function<void(TwoPin&)>& route_func) {
-    mark_overflow(data);
-    sort_twopins(data);
-    // Mark overflowed twopins
-    for (auto& net : data.nets) {
-        for (auto& tp : net.twopin) {
-            if (twopin_overflow(tp)) {
-                ripup(tp);
-                if (route_func) route_func(tp);
-                else route_twopin_default(tp);
-                place(tp);
-            }
-        }
-    }
+// build_cost (aligned with GlobalRouting::build_cost, line 202-220)
+void RoutingCore::build_cost() {
     cost_model_.build_cost(grid_);
 }
 
-void RoutingCore::route_iterate(IspdData& data, int max_iter,
-                                const std::function<void(TwoPin&)>& route_func) {
-    int prev_of = std::numeric_limits<int>::max();
-    for (int i = 0; i < max_iter; i++) {
-        ripup_place_once(data, route_func);
-        auto st = check_overflow(data);
-        if (st.tot == 0) break;
-        if (st.tot >= prev_of) break;  // no improvement
-        prev_of = st.tot;
-    }
+// sort_twopins (aligned with GlobalRouting::sort_twopins, line 222-234)
+void RoutingCore::sort_twopins() {
+    std::sort(nets_.begin(), nets_.end(), [&](auto a, auto b) {
+        auto sa = score(a);
+        auto sb = score(b);
+        return sa > sb;
+    });
+    for (auto net : nets_)
+        std::sort(net->twopins.begin(), net->twopins.end(), [&](auto a, auto b) {
+            auto sa = score(a);
+            auto sb = score(b);
+            auto hpwl_a = std::abs(a->from.x - a->to.x) + std::abs(a->from.y - a->to.y);
+            auto hpwl_b = std::abs(b->from.x - b->to.x) + std::abs(b->from.y - b->to.y);
+            return sa != sb ? sa < sb : hpwl_a < hpwl_b;
+        });
 }
 
-void RoutingCore::route_pipeline(IspdData& data) {
-    // Phase 1: Z-shape refinement (light selcost)
-    set_selcost(0);
-    route_iterate(data, 3, [&](TwoPin& tp){ route_twopin_zshape(tp); });
-    // Phase 2: Monotonic with higher selcost
-    set_selcost(1);
-    route_iterate(data, 5, [&](TwoPin& tp){ route_twopin_monotonic(tp); });
-    // Phase 3: HUM aggressive
-    set_selcost(2);
-    route_iterate(data, 10, [&](TwoPin& tp){ route_twopin_hum(tp); });
-}
-
-int RoutingCore::hpwl(const TwoPin& tp) const {
-    return std::abs(tp.from.x - tp.to.x) + std::abs(tp.from.y - tp.to.y);
-}
-
-double RoutingCore::score_twopin(const TwoPin& tp) const {
-    int dx = 1 + std::abs(tp.from.x - tp.to.x);
-    int dy = 1 + std::abs(tp.from.y - tp.to.y);
-    if (selcost_ == 2) {
-        return 60.0 * (tp.overflow ? 1.0 : 0.0) + 1.0 * (int)tp.path.size();
-    }
-    if (selcost_ == 1) {
-        return 60.0 * (tp.overflow ? 1.0 : 0.0) + (dx * dy);
-    }
+// score for twopin (aligned with GlobalRouting::score(TwoPinPtr), line 236-247)
+inline double RoutingCore::score(const TwoPinPtr twopin) const {
+    if (selcost_ == 2)
+        return 60 * (twopin->overflow ? 1 : 0) + 1 * (int)twopin->path.size();
+    
+    auto dx = 1 + std::abs(twopin->from.x - twopin->to.x);
+    auto dy = 1 + std::abs(twopin->from.y - twopin->to.y);
+    
+    if (selcost_ == 1)
+        return 60 * (twopin->overflow ? 1 : 0) + (dx * dy);
+    
     return 100.0 / std::max(dx, dy);
 }
 
-double RoutingCore::score_net(const Net& net) const {
-    double cost = net.cost <= 0 ? 1.0 : net.cost;
-    return 10.0 * net.overflow + net.overflow_twopin + 3.0 * std::log2(cost);
+// score for net (aligned with GlobalRouting::score(Net*), line 249-251)
+inline double RoutingCore::score(const NetWrapper* net) const {
+    return 10 * net->overflow + net->overflow_twopin + 3 * std::log2(net->cost);
 }
 
-void RoutingCore::sort_twopins(IspdData& data) {
-    // sort nets by descending score
-    std::sort(data.nets.begin(), data.nets.end(), [&](const Net& a, const Net& b) {
-        return score_net(a) > score_net(b);
+// delta (aligned with GlobalRouting::delta, line 253-262)
+inline int RoutingCore::delta(const TwoPinPtr twopin) const {
+    int cnt = twopin->reroute;
+    if (cnt <= 2) return 5;
+    if (cnt <= 6) return 20;
+    return 15;
+}
+
+// check_overflow (aligned with GlobalRouting::check_overflow, line 1049-1104)
+int RoutingCore::check_overflow() {
+    int mxof = 0, totof = 0;
+    
+    for (auto& edge : grid_) {
+        edge.he += edge.of;
+        edge.of = 0;
+        if (edge.overflow()) {
+            auto of = edge.demand - edge.cap;
+            totof += of;
+            if (of > mxof) mxof = of;
+        }
+    }
+    
+    int ofnet = 0, oftp = 0, wl = 0;
+    
+    for (auto net : nets_) {
+        net->cost = net->wlen = net->overflow = net->overflow_twopin = 0;
+        for (auto twopin : net->twopins) {
+            twopin->overflow = false;
+            for (auto rp : twopin->path) {
+                auto& e = getEdge(rp);
+                bool zero = (e.used++ == 0);
+                if (zero) net->wlen++;
+                if (e.overflow()) {
+                    twopin->overflow = true;
+                    if (zero) {
+                        net->cost += cost(e);
+                        net->overflow++;
+                    }
+                }
+            }
+            if (twopin->overflow) {
+                net->overflow_twopin++;
+                oftp++;
+            }
+        }
+        wl += net->wlen;
+        if (net->overflow)
+            ofnet++;
+        for (auto twopin : net->twopins)
+            for (auto rp : twopin->path)
+                getEdge(rp).used--;
+    }
+    
+    if (print_)
+        std::cerr << " tot overflow " << totof
+                  << " mx overflow " << mxof
+                  << " wirelength " << wl
+                  << " of net " << ofnet
+                  << " of twopin " << oftp << std::endl;
+    
+    return totof;
+}
+
+// Lshape (aligned with GlobalRouting::Lshape, line 322-363)
+void RoutingCore::Lshape(TwoPinPtr twopin) {
+    patterns::Lshape(*twopin, [&](int x, int y, bool hori) -> double {
+        return cost(x, y, hori);
     });
-    // sort twopins inside each net (ascending score, then smaller HPWL)
-    for (auto& net : data.nets) {
-        std::sort(net.twopin.begin(), net.twopin.end(), [&](const TwoPin& a, const TwoPin& b) {
-            double sa = score_twopin(a);
-            double sb = score_twopin(b);
-            if (sa != sb) return sa < sb;
-            return hpwl(a) < hpwl(b);
-        });
+}
+
+// Zshape (aligned with GlobalRouting::Zshape, line 365-394)
+void RoutingCore::Zshape(TwoPinPtr twopin) {
+    patterns::Zshape(*twopin, [&](int x, int y, bool hori) -> double {
+        return cost(x, y, hori);
+    });
+}
+
+// monotonic (aligned with GlobalRouting::monotonic, line 434-468)
+void RoutingCore::monotonic(TwoPinPtr twopin) {
+    patterns::Monotonic(*twopin, [&](int x, int y, bool hori) -> double {
+        return cost(x, y, hori);
+    });
+}
+
+// HUM (aligned with GlobalRouting::HUM serial version, line 510-704)
+void RoutingCore::HUM(TwoPinPtr twopin) {
+    hum::HUM(*twopin, grid_, cost_model_, width_, height_);
+}
+
+// ripup_place (aligned with GlobalRouting::ripup_place, line 1106-1139)
+void RoutingCore::ripup_place(FP fp) {
+    sort_twopins();
+    for (auto net : nets_) {
+        for (auto twopin : net->twopins) {
+            twopin->overflow = false;
+            for (auto rp : twopin->path)
+                if (getEdge(rp).overflow()) {
+                    twopin->overflow = true;
+                    break;
+                }
+        }
+        
+        del_cost(net);
+        
+        for (auto twopin : net->twopins) {
+            if (twopin->overflow) {
+                ripup(twopin);
+                add_cost(twopin);
+            }
+        }
+        
+        for (auto twopin : net->twopins) {
+            if (twopin->ripup) {
+                (this->*fp)(twopin);
+                place(twopin);
+                del_cost(twopin);
+            }
+        }
+        
+        add_cost(net);
+    }
+    if (stop_) throw false;
+}
+
+// ripup_place_wl (aligned with GlobalRouting::ripup_place_wl, line 1142-1189)
+void RoutingCore::ripup_place_wl(FP fp) {
+    sort_twopins();
+    for (auto net : nets_) {
+        del_cost(net);
+        
+        for (auto twopin : net->twopins) {
+            if (twopin->path.empty()) continue;
+            if (twopin->path.size() <= 2 && 
+                std::abs(twopin->from.x - twopin->to.x) + std::abs(twopin->from.y - twopin->to.y) <= 2)
+                continue;
+            
+            auto old_path = twopin->path;
+            (this->*fp)(twopin);
+            auto candidate = twopin->path;
+            twopin->path = old_path;
+            
+            if (candidate.size() >= old_path.size()) continue;
+            
+            auto in_old = [&](const RPoint& rp) {
+                for (const auto& p : old_path)
+                    if (p.x == rp.x && p.y == rp.y && p.z == rp.z && p.hori == rp.hori)
+                        return true;
+                return false;
+            };
+            
+            bool safe = true;
+            for (const auto& rp : candidate) if (!in_old(rp)) {
+                const auto& e = getEdge(rp);
+                if (e.demand >= e.cap) {
+                    safe = false;
+                    break;
+                }
+            }
+            if (!safe) continue;
+            
+            ripup(twopin);
+            add_cost(twopin);
+            twopin->path = candidate;
+            place(twopin);
+            del_cost(twopin);
+        }
+        
+        add_cost(net);
+    }
+    if (stop_) throw false;
+}
+
+// routing (aligned with GlobalRouting::routing, line 1191-1211)
+void RoutingCore::routing(const char* name, FP fp, int iteration, int sel_cost) {
+    selcost_ = sel_cost;
+    cost_model_.set_selcost(sel_cost);
+    if (print_) std::cerr << "[*] " << name << " routing" << std::endl;
+    auto start = std::chrono::steady_clock::now();
+    build_cost();
+    
+    int prev_of = std::numeric_limits<int>::max();
+    int stall = 0;
+    for (int i = 1; i <= iteration; i++) {
+        ripup_place(fp);
+        if (print_) std::cerr << " " << i << " time " << sec_since(start) << "s";
+        int of = check_overflow();
+        if (of == 0) throw true;
+        
+        if (of < prev_of) {
+            prev_of = of;
+            stall = 0;
+        } else {
+            stall++;
+        }
+        if (stall >= 100) break;
+        
+        if (stop_) throw false;
+    }
+    if (print_) std::cerr << name << " routing costs " << sec_since(start) << "s" << std::endl;
+}
+
+// refine_wirelength (aligned with GlobalRouting::refine_wirelength, line 1214-1232)
+void RoutingCore::refine_wirelength(const char* name, FP fp, int iteration, int sel_cost) {
+    selcost_ = sel_cost;
+    cost_model_.set_selcost(sel_cost);
+    if (print_) std::cerr << "[*] " << name << " refine WL" << std::endl;
+    auto start = std::chrono::steady_clock::now();
+    build_cost();
+    
+    for (int i = 1; i <= iteration; i++) {
+        ripup_place_wl(fp);
+        if (print_) std::cerr << " " << i << " time " << sec_since(start) << "s";
+        int of = check_overflow();
+        if (of > 0) {
+            if (print_) std::cerr << " refine aborted due to OF>0 " << of << std::endl;
+            break;
+        }
+        if (stop_) throw false;
+    }
+    if (print_) std::cerr << name << " refine WL costs " << sec_since(start) << "s" << std::endl;
+}
+
+// preroute (aligned with GlobalRouting::preroute, line 1023-1047)
+void RoutingCore::preroute(IspdData& /* data */) {
+    if (print_) std::cerr << "[*] preroute" << std::endl;
+    auto start = std::chrono::steady_clock::now();
+    
+    for (auto net : nets_) {
+        net->wlen = 0;
+        for (auto twopin : net->twopins) {
+            auto hpwl = std::abs(twopin->from.x - twopin->to.x) + std::abs(twopin->from.y - twopin->to.y);
+            net->wlen += hpwl;
+        }
+    }
+    
+    sort_twopins();
+    build_cost();
+    
+    for (auto net : nets_) {
+        net->wlen = 0;
+        for (auto twopin : net->twopins) {
+            twopin->ripup = true;
+            Lshape(twopin);
+            place(twopin);
+            del_cost(twopin);
+        }
+        add_cost(net);
+    }
+    
+    if (print_) std::cerr << " time " << sec_since(start) << "s";
+    check_overflow();
+}
+
+// construct_2D_grid_graph (aligned with GlobalRouting::construct_2D_grid_graph, line 917-963)
+void RoutingCore::construct_2D_grid_graph() {
+    // Filter nets: remove nets with >1000 pins or <=1 2D pins
+    ispdData_->nets.erase(
+        std::remove_if(ispdData_->nets.begin(), ispdData_->nets.end(), [&](auto& net) {
+            for (auto& _pin : net.pins) {
+                int x = (std::get<0>(_pin) - ispdData_->lowerLeftX) / ispdData_->tileWidth;
+                int y = (std::get<1>(_pin) - ispdData_->lowerLeftY) / ispdData_->tileHeight;
+                int z = std::get<2>(_pin) - 1;
+                
+                if (std::any_of(net.pin3D.begin(), net.pin3D.end(), [x, y, z](const auto& pin) {
+                    return pin.x == x && pin.y == y && pin.z == z;
+                })) continue;
+                net.pin3D.emplace_back(x, y, z);
+                
+                if (std::any_of(net.pin2D.begin(), net.pin2D.end(), [x, y](const auto& pin) {
+                    return pin.x == x && pin.y == y;
+                })) continue;
+                net.pin2D.emplace_back(x, y, 0);
+            }
+            
+            return net.pin3D.size() > 1000 || net.pin2D.size() <= 1;
+        }),
+        ispdData_->nets.end()
+    );
+    ispdData_->numNet = (int)ispdData_->nets.size();
+    
+    auto verticalCapacity = std::accumulate(ispdData_->verticalCapacity.begin(),
+                                            ispdData_->verticalCapacity.end(), 0);
+    auto horizontalCapacity = std::accumulate(ispdData_->horizontalCapacity.begin(),
+                                              ispdData_->horizontalCapacity.end(), 0);
+    verticalCapacity /= min_net_;
+    horizontalCapacity /= min_net_;
+    mx_cap_ = std::max(verticalCapacity, horizontalCapacity);
+    
+    grid_.init(width_, height_, Edge(verticalCapacity), Edge(horizontalCapacity));
+    
+    for (auto& capacityAdj : ispdData_->capacityAdjs) {
+        auto [x1, y1, z1] = capacityAdj.grid1;
+        auto [x2, y2, z2] = capacityAdj.grid2;
+        if (z1 != z2) continue;
+        auto z = (std::size_t)z1 - 1;
+        auto lx = std::min(x1, x2), rx = std::max(x1, x2);
+        auto ly = std::min(y1, y2), ry = std::max(y1, y2);
+        auto dx = rx - lx, dy = ry - ly;
+        if (dx + dy != 1) continue;
+        auto hori = (dx != 0);
+        auto& edge = getEdge(lx, ly, hori);
+        auto layerCap = hori ? ispdData_->horizontalCapacity[z] : ispdData_->verticalCapacity[z];
+        edge.cap -= (layerCap - capacityAdj.reducedCapacityLevel) / min_net_;
     }
 }
 
+// net_decomposition (aligned with GlobalRouting::net_decomposition, line 965-995)
+void RoutingCore::net_decomposition() {
+    for (auto& net : ispdData_->nets) {
+        auto sz = net.pin2D.size();
+        net.twopin.clear();
+        net.twopin.reserve(sz - 1);
+        std::vector<bool> vis(sz, false);
+        std::priority_queue<std::tuple<int, std::size_t, std::size_t>> pq{};
+        
+        auto add = [&](std::size_t i) {
+            vis[i] = true;
+            auto [xi, yi, zi] = net.pin2D[i];
+            for (std::size_t j = 0; j < sz; j++) if (!vis[j]) {
+                auto [xj, yj, zj] = net.pin2D[j];
+                auto d = std::abs(xi - xj) + std::abs(yi - yj);
+                pq.emplace(-d, i, j);
+            }
+        };
+        
+        add(0);
+        while (!pq.empty()) {
+            auto [d, i, j] = pq.top();
+            pq.pop();
+            if (vis[j]) continue;
+            TwoPin tp;
+            tp.from = net.pin2D[i];
+            tp.to = net.pin2D[j];
+            net.twopin.emplace_back(tp);
+            add(j);
+        }
+    }
+}
+
+// route (aligned with GlobalRouting::route, line 865-915)
+void RoutingCore::route(IspdData& data, bool leave) {
+    ispdData_ = &data;
+    width_ = (std::size_t)ispdData_->numXGrid;
+    height_ = (std::size_t)ispdData_->numYGrid;
+    min_width_ = average(ispdData_->minimumWidth);
+    min_spacing_ = average(ispdData_->minimumSpacing);
+    min_net_ = min_width_ + min_spacing_;
+    
+    construct_2D_grid_graph();
+    net_decomposition();
+    
+    // Build Net wrappers
+    for (auto net : nets_) delete net;
+    nets_.clear();
+    nets_.reserve(ispdData_->nets.size());
+    auto twopin_count = std::accumulate(ispdData_->nets.begin(), ispdData_->nets.end(), 0u,
+                                        [&](auto s, auto& net) {
+                                            return s + net.twopin.size();
+                                        });
+    twopins_.reserve(twopin_count);
+    
+    for (auto& net : ispdData_->nets) {
+        auto mynet = new NetWrapper(&net);
+        mynet->twopins.reserve(net.twopin.size());
+        nets_.emplace_back(mynet);
+        for (auto& twopin : net.twopin) {
+            twopins_.emplace_back(&twopin);
+            mynet->twopins.emplace_back(&twopin);
+        }
+    }
+    
+    selcost_ = 0;
+    cost_model_.set_selcost(0);
+    preroute(data);
+    if (leave) return;
+    
+    selcost_ = 0;
+    
+    try { routing("Lshape", &RoutingCore::Lshape, 1, selcost_); }
+    catch (bool done) { if (!done) throw; }
+    
+    try { routing("Zshape", &RoutingCore::Zshape, 2, selcost_); }
+    catch (bool done) { if (!done) throw; }
+    
+    selcost_ = 1;
+    try { routing("monotonic", &RoutingCore::monotonic, 5, selcost_); }
+    catch (bool done) { if (!done) throw; }
+    
+    selcost_ = 2;
+    try { routing("HUM", &RoutingCore::HUM, 10000, selcost_); }
+    catch (bool done) { if (!done) throw; }
+    
+    selcost_ = 0;
+    refine_wirelength("refine WL monotonic", &RoutingCore::monotonic, 4, selcost_);
+    refine_wirelength("refine WL Zshape", &RoutingCore::Zshape, 4, selcost_);
+    refine_wirelength("refine WL Lshape", &RoutingCore::Lshape, 4, selcost_);
+}
+
+// Legacy interface for backward compatibility
+void RoutingCore::route_pipeline(IspdData& data) {
+    route(data, false);
+}
+
 }  // namespace vlsigr
-
-
-
