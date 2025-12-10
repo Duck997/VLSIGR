@@ -112,7 +112,7 @@ public:
 
 };
 
-static ispdData* parse(std::istream &is) {
+[[maybe_unused]] static ispdData* parse(std::istream &is) {
     ispdData *data = new ispdData();
     std::string keyword;
     is >> keyword >> data->numXGrid >> data->numYGrid >> data->numLayer;
@@ -188,6 +188,7 @@ public:
     Point(int x, int y) : x(x), y(y), z(0) {}
     Point(int x, int y, int z) : x(x), y(y), z(z) {}
     Point(const Point &p) : x(p.x), y(p.y), z(p.z) {}
+    Point& operator=(const Point&) = default;
     ~Point() {}
 };
 
@@ -202,6 +203,7 @@ public:
     RPoint(int x, int y, bool h) : x(x), y(y), hori(h) { z = 0; }
     RPoint(int x, int y, int z, bool h) : x(x), y(y), z(z), hori(h) {}
     RPoint(const RPoint &p) : x(p.x), y(p.y), z(p.z), hori(p.hori) {}
+    RPoint& operator=(const RPoint&) = default;
 };
 
 struct TwoPin

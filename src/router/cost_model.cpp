@@ -22,7 +22,6 @@ void CostModel::build_cost_pe() {
 }
 
 double CostModel::calc_cost(const Edge& e) const {
-    if (e.cap <= 0) return 1e12;  // blocked edge
     // follow legacy cost: demand+1 to anticipate usage
     int demand = e.demand + 1;
     int cap = e.cap;
