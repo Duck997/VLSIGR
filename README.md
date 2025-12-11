@@ -32,6 +32,8 @@ CLI：
 ./draw examples/complex.gr output.txt examples/complex_map.txt examples/complex.ppm --nets examples/complex_nets.ppm --scale 3
 ```
 
+#### C++ API
+
 ```cpp
 #include "api/vlsigr.hpp"
 using namespace vlsigr;
@@ -39,11 +41,67 @@ using namespace vlsigr;
 int main() {
     GlobalRouter router;
     router.load_ispd_benchmark("examples/complex.gr");
-    Metrics m = router.route("output.txt"); // 可選：寫出 layer assignment 結果
-    // m.runtime_sec, m.total_overflow, m.total_wirelength
+    router.route("output.txt"); // 可選：若提供路徑，會同時跑 LayerAssignment 並寫出結果
+
+    const auto& m = router.getPerformanceMetrics();
+    // m.runtime_sec, m.total_overflow, m.max_overflow
+    // m.wirelength_2d, m.wirelength_total, m.total_vias
     return 0;
 }
 ```
+
+```cpp
+#include "api/vlsigr.hpp"
+
+int main() {
+    auto* data = ISPDParser::parse_file("examples/complex.gr"); // new; caller owns
+
+    VLSIGR::GlobalRouting router;
+    router.init(*data);
+    router.setMode(VLSIGR::Mode::BALANCED);
+    router.enableAdaptiveScoring(true);
+    router.enableHUMOptimization(true);
+    router.route();
+
+    auto results = router.getResults();
+    auto metrics = router.getPerformanceMetrics();
+
+    VLSIGR::Visualization viz;
+    viz.generateMap(data, results, "routing_result.ppm");
+
+    delete data;
+    return 0;
+}
+```
+
+#### API Visualization (advanced)
+`generateMap()` 也提供進階 overload，可以用 `vlsigr::draw::DrawOptions` 打開 `draw.cpp` 的完整功能（`nets/overflow/layers/stats/scale/...`）：
+
+```cpp
+VLSIGR::Visualization viz;
+vlsigr::draw::DrawOptions opt;
+opt.nets_ppm = "complex_nets.ppm";
+opt.overflow_ppm = "complex_overflow.ppm";
+opt.layer_dir = "layers";
+opt.stats_path = "stats.txt";
+opt.out_map = "complex_map.txt";
+opt.scale = 3;
+viz.generateMap(&router.data(), results, "complex.ppm", opt);
+```
+
+#### Tests
+- 快速跑所有單元測試：
+
+```bash
+make test
+```
+
+- `adaptec1.gr` 驗證（官方 `eval2008.pl`，較慢，預設不跑）：
+
+```bash
+VLSIGR_RUN_ADAPTEC1=1 make test
+```
+
 ## Features
 
 - **Multi-Mode Cost Function**: Adaptive scoring system with congestion, wirelength, and via optimization
