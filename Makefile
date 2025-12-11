@@ -9,11 +9,12 @@ endif
 
 SRC_DIR := src
 ROUTER_DIR := $(SRC_DIR)/router
+API_DIR := $(SRC_DIR)/api
 BIN := router
 DRAW_BIN := draw
 
 THIRD_PARTY := third_party/LayerAssignment.cpp
-SRCS := $(SRC_DIR)/main.cpp $(wildcard $(ROUTER_DIR)/*.cpp) $(THIRD_PARTY)
+SRCS := $(SRC_DIR)/main.cpp $(wildcard $(ROUTER_DIR)/*.cpp) $(wildcard $(API_DIR)/*.cpp) $(SRC_DIR)/tools/draw_lib.cpp $(THIRD_PARTY)
 OBJS := $(SRCS:.cpp=.o)
 
 DRAW_SRCS := $(SRC_DIR)/tools/draw.cpp $(SRC_DIR)/router/ispd_data.cpp

@@ -14,6 +14,7 @@
 #include <queue>
 
 #include "router/ispd_data.hpp"
+#include "tools/draw_api.hpp"
 
 namespace {
 
@@ -33,7 +34,7 @@ struct Cell {
 
 using EdgeGrid = std::vector<std::vector<std::vector<EdgeAgg>>>;  // [x][y][layer]
 
-std::tuple<int,int,int,int,int,int> parse_segment(const std::string& line) {
+[[maybe_unused]] std::tuple<int,int,int,int,int,int> parse_segment(const std::string& line) {
     // format: (x1,y1,z1)-(x2,y2,z2)
     char c;
     int x1,y1,z1,x2,y2,z2;
@@ -44,7 +45,7 @@ std::tuple<int,int,int,int,int,int> parse_segment(const std::string& line) {
     return {x1,y1,z1,x2,y2,z2};
 }
 
-void write_map(const std::string& path, const std::vector<std::vector<Cell>>& image, int numLayer) {
+[[maybe_unused]] void write_map(const std::string& path, const std::vector<std::vector<Cell>>& image, int numLayer) {
     const int ih = static_cast<int>(image.size());
     const int iw = ih ? static_cast<int>(image[0].size()) : 0;
     std::ofstream fcmap(path);
@@ -139,7 +140,7 @@ void write_ppm(const std::string& path, const std::vector<std::vector<Cell>>& im
 }
 
 // Only highlight overflow edges (red) on dark background
-void write_overflow_ppm(const std::string& path, const std::vector<std::vector<Cell>>& image, int scale = 1) {
+[[maybe_unused]] void write_overflow_ppm(const std::string& path, const std::vector<std::vector<Cell>>& image, int scale = 1) {
     const int ih = static_cast<int>(image.size());
     const int iw = ih ? static_cast<int>(image[0].size()) : 0;
     FILE* fp = std::fopen(path.c_str(), "w");
@@ -180,7 +181,7 @@ void write_overflow_ppm(const std::string& path, const std::vector<std::vector<C
 }
 
 // Color by net ID (each net uses distinct color from palette)
-void write_nets_ppm(const std::string& path,
+[[maybe_unused]] void write_nets_ppm(const std::string& path,
                     const std::vector<std::vector<Cell>>& image,
                     int scale = 1) {
     const int ih = static_cast<int>(image.size());
@@ -313,7 +314,7 @@ void write_nets_ppm(const std::string& path,
 }
 
 // Render one specific layer
-void write_layer_ppm(const std::string& path,
+[[maybe_unused]] void write_layer_ppm(const std::string& path,
                      int layer,
                      int X, int Y,
                      const EdgeGrid& vertical,
@@ -403,7 +404,7 @@ struct Stats {
     std::size_t overflow_edges = 0;
 };
 
-double percentile(std::vector<double>& v, double p) {
+[[maybe_unused]] double percentile(std::vector<double>& v, double p) {
     if (v.empty()) return 0.0;
     double idx = p * (v.size() - 1);
     std::size_t lo = static_cast<std::size_t>(idx);
@@ -417,7 +418,7 @@ double percentile(std::vector<double>& v, double p) {
     return lo_val + (hi_val - lo_val) * frac;
 }
 
-Stats compute_stats(const EdgeGrid& vertical, const EdgeGrid& horizontal) {
+[[maybe_unused]] Stats compute_stats(const EdgeGrid& vertical, const EdgeGrid& horizontal) {
     std::vector<double> util;
     std::size_t overflow_edges = 0;
     auto push_edge = [&](int demand, int cap) {
@@ -456,6 +457,629 @@ Stats compute_stats(const EdgeGrid& vertical, const EdgeGrid& horizontal) {
 
 } // anonymous namespace
 
+namespace vlsigr::draw {
+
+void render_from_data(const vlsigr::IspdData& data, const DrawOptions& opt) {
+    const int X = data.numXGrid;
+    const int Y = data.numYGrid;
+    const int Z = data.numLayer;
+    if (X <= 0 || Y <= 0 || Z <= 0) {
+        throw std::runtime_error("render_from_data: invalid grid size");
+    }
+
+    const int scale = (opt.scale <= 0 ? 1 : opt.scale);
+
+    auto avg = [](const std::vector<int>& v) {
+        long long s = 0;
+        for (auto x : v) s += x;
+        return v.empty() ? 0 : static_cast<int>(s / static_cast<long long>(v.size()));
+    };
+    int min_net = avg(data.minimumWidth) + avg(data.minimumSpacing);
+    if (min_net <= 0) min_net = 1;
+
+    // Edge capacity per layer
+    EdgeGrid vertical(X, std::vector<std::vector<EdgeAgg>>(Y - 1, std::vector<EdgeAgg>(Z)));
+    EdgeGrid horizontal(X - 1, std::vector<std::vector<EdgeAgg>>(Y, std::vector<EdgeAgg>(Z)));
+
+    // Maps to track which nets use which edges/nodes
+    std::map<std::tuple<int, int, int, bool>, std::set<int>> edge_nets; // (x,y,z,hori) -> net IDs
+    std::map<std::tuple<int, int>, std::set<int>> node_nets;            // (x,y) -> net IDs (across all layers)
+
+    for (int z = 0; z < Z; ++z) {
+        int vcap = data.verticalCapacity[z] / min_net;
+        int hcap = data.horizontalCapacity[z] / min_net;
+        for (int x = 0; x < X; ++x)
+            for (int y = 0; y < Y - 1; ++y)
+                vertical[x][y][z].cap = vcap;
+        for (int x = 0; x < X - 1; ++x)
+            for (int y = 0; y < Y; ++y)
+                horizontal[x][y][z].cap = hcap;
+    }
+
+    // Apply capacity adjustments (and collect blocked edges for visualization)
+    std::vector<std::vector<bool>> blocked_hori(X - 1, std::vector<bool>(Y, false));
+    std::vector<std::vector<bool>> blocked_vert(X, std::vector<bool>(Y - 1, false));
+    for (const auto& adj : data.capacityAdjs) {
+        auto [x1, y1, z1] = adj.grid1;
+        auto [x2, y2, z2] = adj.grid2;
+        if (z1 != z2) continue;
+        int z = z1 - 1;
+        if (z < 0 || z >= Z) continue;
+        int lx = std::min(x1, x2), rx = std::max(x1, x2);
+        int ly = std::min(y1, y2), ry = std::max(y1, y2);
+        int dx = rx - lx, dy = ry - ly;
+        if (dx + dy != 1) continue;
+        bool hori = dx;
+        if (hori) {
+            int cap_layer = data.horizontalCapacity[z] / min_net;
+            horizontal[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
+            if (adj.reducedCapacityLevel <= 0) {
+                if (lx >= 0 && lx < X - 1 && ly >= 0 && ly < Y) blocked_hori[lx][ly] = true;
+            }
+        } else {
+            int cap_layer = data.verticalCapacity[z] / min_net;
+            vertical[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
+            if (adj.reducedCapacityLevel <= 0) {
+                if (lx >= 0 && lx < X && ly >= 0 && ly < Y - 1) blocked_vert[lx][ly] = true;
+            }
+        }
+    }
+
+    // Accumulate demand from routed twopin paths (in-memory)
+    for (const auto& net : data.nets) {
+        const int id = net.id;
+        for (const auto& tp : net.twopin) {
+            for (const auto& rp : tp.path) {
+                int z = rp.z;
+                if (z < 0) z = 0;
+                if (z >= Z) z = Z - 1;
+                if (rp.hori) {
+                    if (rp.x < 0 || rp.x >= X - 1 || rp.y < 0 || rp.y >= Y) continue;
+                    horizontal[rp.x][rp.y][z].demand++;
+                    edge_nets[{rp.x, rp.y, z, true}].insert(id);
+                    node_nets[{rp.x, rp.y}].insert(id);
+                    node_nets[{rp.x + 1, rp.y}].insert(id);
+                } else {
+                    if (rp.x < 0 || rp.x >= X || rp.y < 0 || rp.y >= Y - 1) continue;
+                    vertical[rp.x][rp.y][z].demand++;
+                    edge_nets[{rp.x, rp.y, z, false}].insert(id);
+                    node_nets[{rp.x, rp.y}].insert(id);
+                    node_nets[{rp.x, rp.y + 1}].insert(id);
+                }
+            }
+        }
+    }
+
+    // Build image grid (2*X-1 by 2*Y-1), top to bottom
+    const int iw = 2 * X - 1;
+    const int ih = 2 * Y - 1;
+    std::vector<std::vector<Cell>> image(ih, std::vector<Cell>(iw));
+    for (int i = 0; i < ih; ++i) {
+        for (int j = 0; j < iw; ++j) {
+            int x = j / 2;
+            int y = (ih - 1 - i) / 2;
+            auto& cell = image[i][j];
+            cell.x = x;
+            cell.y = y;
+            switch (((i % 2) << 1) | (j % 2)) {
+                case 0: { // node
+                    cell.via = 0;
+                    if (node_nets.count({x, y})) {
+                        cell.nets = node_nets[{x, y}];
+                    }
+                    bool b = false;
+                    if (x > 0 && x - 1 < X - 1 && y >= 0 && y < Y && blocked_hori[x - 1][y]) b = true;
+                    if (x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) b = true;
+                    if (y > 0 && x >= 0 && x < X && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
+                    if (y < Y - 1 && x >= 0 && x < X && blocked_vert[x][y]) b = true;
+                    cell.blockage = b;
+                    break;
+                }
+                case 1: { // horizontal edge
+                    cell.via = -1;
+                    int demand = 0, cap = 0;
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y) {
+                        for (int z = 0; z < Z; ++z) {
+                            demand += horizontal[x][y][z].demand;
+                            cap += horizontal[x][y][z].cap;
+                            if (edge_nets.count({x, y, z, true})) {
+                                for (int net_id : edge_nets[{x, y, z, true}]) cell.nets.insert(net_id);
+                            }
+                        }
+                    }
+                    cell.demand = demand;
+                    cell.cap = cap;
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) cell.blockage = true;
+                    break;
+                }
+                case 2: { // vertical edge
+                    cell.via = -2;
+                    int demand = 0, cap = 0;
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1) {
+                        for (int z = 0; z < Z; ++z) {
+                            demand += vertical[x][y][z].demand;
+                            cap += vertical[x][y][z].cap;
+                            if (edge_nets.count({x, y, z, false})) {
+                                for (int net_id : edge_nets[{x, y, z, false}]) cell.nets.insert(net_id);
+                            }
+                        }
+                    }
+                    cell.demand = demand;
+                    cell.cap = cap;
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) cell.blockage = true;
+                    break;
+                }
+                default: { // filler
+                    cell.via = -3;
+                }
+            }
+        }
+    }
+
+    // Keep the same "solid-fill rectangular obstacles" behavior as CLI.
+    // NOTE: we reuse the existing code paths below by calling write_ppm after the fill step.
+    {
+        std::vector<std::vector<uint8_t>> node_has_blk(X, std::vector<uint8_t>(Y, 0));
+        for (int x = 0; x < X; ++x) {
+            for (int y = 0; y < Y; ++y) {
+                bool b = false;
+                if (x > 0 && x - 1 < X - 1 && blocked_hori[x - 1][y]) b = true;
+                if (x < X - 1 && blocked_hori[x][y]) b = true;
+                if (y > 0 && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
+                if (y < Y - 1 && blocked_vert[x][y]) b = true;
+                node_has_blk[x][y] = b ? 1 : 0;
+            }
+        }
+
+        std::vector<std::vector<uint8_t>> vis(X, std::vector<uint8_t>(Y, 0));
+        auto perimeter_is_rect = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            if (minx < 0 || miny < 0 || maxx >= X || maxy >= Y) return false;
+            if (maxx - minx < 2 || maxy - miny < 2) return false;
+            for (int x = minx; x <= maxx - 1; ++x) {
+                if (!blocked_hori[x][miny]) return false;
+                if (!blocked_hori[x][maxy]) return false;
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                if (!blocked_vert[minx][y]) return false;
+                if (!blocked_vert[maxx][y]) return false;
+            }
+            return true;
+        };
+        auto has_interior_blocked = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            for (int y = miny + 1; y <= maxy - 1; ++y) {
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) return true;
+                }
+            }
+            for (int x = minx + 1; x <= maxx - 1; ++x) {
+                for (int y = miny; y <= maxy - 1; ++y) {
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) return true;
+                }
+            }
+            return false;
+        };
+        auto fill_bbox = [&](int minx, int maxx, int miny, int maxy) {
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+        };
+
+        for (int sx = 0; sx < X; ++sx) {
+            for (int sy = 0; sy < Y; ++sy) {
+                if (!node_has_blk[sx][sy] || vis[sx][sy]) continue;
+                std::queue<std::pair<int, int>> q;
+                q.push({sx, sy});
+                vis[sx][sy] = 1;
+                int minx = sx, maxx = sx, miny = sy, maxy = sy;
+                int cnt_nodes = 0;
+                while (!q.empty()) {
+                    auto [x, y] = q.front();
+                    q.pop();
+                    cnt_nodes++;
+                    minx = std::min(minx, x);
+                    maxx = std::max(maxx, x);
+                    miny = std::min(miny, y);
+                    maxy = std::max(maxy, y);
+                    if (x > 0 && blocked_hori[x - 1][y] && !vis[x - 1][y]) { vis[x - 1][y] = 1; q.push({x - 1, y}); }
+                    if (x < X - 1 && blocked_hori[x][y] && !vis[x + 1][y]) { vis[x + 1][y] = 1; q.push({x + 1, y}); }
+                    if (y > 0 && blocked_vert[x][y - 1] && !vis[x][y - 1]) { vis[x][y - 1] = 1; q.push({x, y - 1}); }
+                    if (y < Y - 1 && blocked_vert[x][y] && !vis[x][y + 1]) { vis[x][y + 1] = 1; q.push({x, y + 1}); }
+                }
+                int w = maxx - minx + 1;
+                int h = maxy - miny + 1;
+                int perimeter_nodes = 2 * w + 2 * h - 4;
+                bool count_ok = (cnt_nodes >= static_cast<int>(0.6 * perimeter_nodes)) &&
+                                (cnt_nodes <= static_cast<int>(1.6 * perimeter_nodes));
+                if (count_ok && perimeter_is_rect(minx, maxx, miny, maxy) && !has_interior_blocked(minx, maxx, miny, maxy)) {
+                    fill_bbox(minx, maxx, miny, maxy);
+                }
+            }
+        }
+    }
+
+    // Emit outputs requested by options (match CLI behavior).
+    if (!opt.out_map.empty()) {
+        write_map(opt.out_map, image, Z);
+    }
+    if (!opt.out_ppm.empty()) {
+        write_ppm(opt.out_ppm, image, Z, scale);
+    }
+    if (!opt.overflow_ppm.empty()) {
+        write_overflow_ppm(opt.overflow_ppm, image, scale);
+    }
+    if (!opt.layer_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(opt.layer_dir, ec);
+        if (ec) throw std::runtime_error("render_from_data: failed to create layer dir");
+        for (int z = 0; z < Z; ++z) {
+            std::stringstream ss;
+            ss << opt.layer_dir << "/layer_" << (z + 1) << ".ppm";
+            write_layer_ppm(ss.str(), z, X, Y, vertical, horizontal, edge_nets, node_nets, image, scale);
+        }
+    }
+    if (!opt.nets_ppm.empty()) {
+        write_nets_ppm(opt.nets_ppm, image, scale);
+    }
+    if (!opt.stats_path.empty()) {
+        Stats st = compute_stats(vertical, horizontal);
+        std::ofstream ofs(opt.stats_path);
+        if (!ofs.is_open()) throw std::runtime_error("render_from_data: failed to open stats output");
+        ofs << "Edges: " << st.edges
+            << " overflow_edges: " << st.overflow_edges << '\n'
+            << "util min/median/p90/p95/p99/max: "
+            << st.min << ' ' << st.p50 << ' ' << st.p90 << ' '
+            << st.p95 << ' ' << st.p99 << ' ' << st.max << '\n';
+    }
+}
+
+void render_from_files(const std::string& input_gr,
+                       const std::string& input_out,
+                       const DrawOptions& opt) {
+    if (input_gr.empty() || input_out.empty()) throw std::runtime_error("render_from_files: empty input path");
+
+    // Parse ISPD input
+    vlsigr::IspdData data;
+    data = vlsigr::parse_ispd_file(input_gr);
+
+    const int X = data.numXGrid;
+    const int Y = data.numYGrid;
+    const int Z = data.numLayer;
+
+    auto avg = [](const std::vector<int>& v) {
+        long long s = 0;
+        for (auto x : v) s += x;
+        return v.empty() ? 0 : static_cast<int>(s / static_cast<long long>(v.size()));
+    };
+    int min_net = avg(data.minimumWidth) + avg(data.minimumSpacing);
+    if (min_net <= 0) min_net = 1;
+
+    EdgeGrid vertical(X, std::vector<std::vector<EdgeAgg>>(Y - 1, std::vector<EdgeAgg>(Z)));
+    EdgeGrid horizontal(X - 1, std::vector<std::vector<EdgeAgg>>(Y, std::vector<EdgeAgg>(Z)));
+
+    std::map<std::tuple<int, int, int, bool>, std::set<int>> edge_nets;
+    std::map<std::tuple<int, int>, std::set<int>> node_nets;
+
+    for (int z = 0; z < Z; ++z) {
+        int vcap = data.verticalCapacity[z] / min_net;
+        int hcap = data.horizontalCapacity[z] / min_net;
+        for (int x = 0; x < X; ++x)
+            for (int y = 0; y < Y - 1; ++y)
+                vertical[x][y][z].cap = vcap;
+        for (int x = 0; x < X - 1; ++x)
+            for (int y = 0; y < Y; ++y)
+                horizontal[x][y][z].cap = hcap;
+    }
+
+    std::vector<std::vector<bool>> blocked_hori(X - 1, std::vector<bool>(Y, false));
+    std::vector<std::vector<bool>> blocked_vert(X, std::vector<bool>(Y - 1, false));
+    for (const auto& adj : data.capacityAdjs) {
+        auto [x1, y1, z1] = adj.grid1;
+        auto [x2, y2, z2] = adj.grid2;
+        if (z1 != z2) continue;
+        int z = z1 - 1;
+        int lx = std::min(x1, x2), rx = std::max(x1, x2);
+        int ly = std::min(y1, y2), ry = std::max(y1, y2);
+        int dx = rx - lx, dy = ry - ly;
+        if (dx + dy != 1) continue;
+        bool hori = dx;
+        if (hori) {
+            int cap_layer = data.horizontalCapacity[z] / min_net;
+            horizontal[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
+            if (adj.reducedCapacityLevel <= 0) {
+                if (lx >= 0 && lx < X - 1 && ly >= 0 && ly < Y) blocked_hori[lx][ly] = true;
+            }
+        } else {
+            int cap_layer = data.verticalCapacity[z] / min_net;
+            vertical[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
+            if (adj.reducedCapacityLevel <= 0) {
+                if (lx >= 0 && lx < X && ly >= 0 && ly < Y - 1) blocked_vert[lx][ly] = true;
+            }
+        }
+    }
+
+    // Accumulate demand from output.txt segments AND track net usage
+    std::ifstream fin(input_out);
+    if (!fin.is_open()) throw std::runtime_error("render_from_files: failed to open routing output");
+    while (!fin.eof()) {
+        std::string netname, line;
+        int id;
+        if (!(fin >> netname >> id)) break;
+        fin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        while (std::getline(fin, line)) {
+            if (line == "!") break;
+            if (line.empty()) continue;
+            auto [x1r, y1r, z1, x2r, y2r, z2] = parse_segment(line);
+            int x1 = (x1r - data.lowerLeftX) / data.tileWidth;
+            int y1 = (y1r - data.lowerLeftY) / data.tileHeight;
+            int x2 = (x2r - data.lowerLeftX) / data.tileWidth;
+            int y2 = (y2r - data.lowerLeftY) / data.tileHeight;
+            int z = z1 - 1;
+            int zt = z2 - 1;
+            if (z != zt) {
+                node_nets[{x1, y1}].insert(id);
+                node_nets[{x2, y2}].insert(id);
+                continue;
+            }
+            if (x1 == x2 && y1 == y2) continue;
+            if (z < 0 || z >= Z) continue;
+            if (y1 == y2) {
+                if (x1 > x2) std::swap(x1, x2);
+                for (int x = x1; x < x2; ++x) {
+                    if (x < 0 || x >= X - 1 || y1 < 0 || y1 >= Y) continue;
+                    horizontal[x][y1][z].demand++;
+                    edge_nets[{x, y1, z, true}].insert(id);
+                    node_nets[{x, y1}].insert(id);
+                    node_nets[{x + 1, y1}].insert(id);
+                }
+            } else if (x1 == x2) {
+                if (y1 > y2) std::swap(y1, y2);
+                for (int y = y1; y < y2; ++y) {
+                    if (x1 < 0 || x1 >= X || y < 0 || y >= Y - 1) continue;
+                    vertical[x1][y][z].demand++;
+                    edge_nets[{x1, y, z, false}].insert(id);
+                    node_nets[{x1, y}].insert(id);
+                    node_nets[{x1, y + 1}].insert(id);
+                }
+            }
+        }
+    }
+
+    // Reuse the same image construction + obstacle fill + output emission as in-memory mode:
+    // Build a shallow IspdData with twopin paths not needed here; instead we feed already computed demands
+    // by calling render_from_data-like code path is complex, so we simply reuse the existing CLI code path:
+
+    // Build image grid (2*X-1 by 2*Y-1), top to bottom (same as CLI)
+    const int iw = 2 * X - 1;
+    const int ih = 2 * Y - 1;
+    std::vector<std::vector<Cell>> image(ih, std::vector<Cell>(iw));
+    for (int i = 0; i < ih; ++i) {
+        for (int j = 0; j < iw; ++j) {
+            int x = j / 2;
+            int y = (ih - 1 - i) / 2;
+            auto& cell = image[i][j];
+            cell.x = x;
+            cell.y = y;
+            switch (((i % 2) << 1) | (j % 2)) {
+                case 0: {
+                    cell.via = 0;
+                    if (node_nets.count({x, y})) cell.nets = node_nets[{x, y}];
+                    bool b = false;
+                    if (x > 0 && x - 1 < X - 1 && y >= 0 && y < Y && blocked_hori[x - 1][y]) b = true;
+                    if (x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) b = true;
+                    if (y > 0 && x >= 0 && x < X && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
+                    if (y < Y - 1 && x >= 0 && x < X && blocked_vert[x][y]) b = true;
+                    cell.blockage = b;
+                    break;
+                }
+                case 1: {
+                    cell.via = -1;
+                    int demand = 0, cap = 0;
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y) {
+                        for (int z = 0; z < Z; ++z) {
+                            demand += horizontal[x][y][z].demand;
+                            cap += horizontal[x][y][z].cap;
+                            if (edge_nets.count({x, y, z, true})) {
+                                for (int net_id : edge_nets[{x, y, z, true}]) cell.nets.insert(net_id);
+                            }
+                        }
+                    }
+                    cell.demand = demand;
+                    cell.cap = cap;
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) cell.blockage = true;
+                    break;
+                }
+                case 2: {
+                    cell.via = -2;
+                    int demand = 0, cap = 0;
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1) {
+                        for (int z = 0; z < Z; ++z) {
+                            demand += vertical[x][y][z].demand;
+                            cap += vertical[x][y][z].cap;
+                            if (edge_nets.count({x, y, z, false})) {
+                                for (int net_id : edge_nets[{x, y, z, false}]) cell.nets.insert(net_id);
+                            }
+                        }
+                    }
+                    cell.demand = demand;
+                    cell.cap = cap;
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) cell.blockage = true;
+                    break;
+                }
+                default: {
+                    cell.via = -3;
+                }
+            }
+        }
+    }
+
+    // Reuse the same solid-fill rectangle logic by calling the existing code via render_from_data
+    // is not trivial here; keep behavior consistent by copying the rectangle fill block from CLI path:
+    // (We call render_from_data on a synthetic path would recompute demands, so not used.)
+    // Instead, directly execute the same rectangle fill block by invoking the existing helper block:
+    {
+        std::vector<std::vector<uint8_t>> node_has_blk(X, std::vector<uint8_t>(Y, 0));
+        for (int x = 0; x < X; ++x) {
+            for (int y = 0; y < Y; ++y) {
+                bool b = false;
+                if (x > 0 && x - 1 < X - 1 && blocked_hori[x - 1][y]) b = true;
+                if (x < X - 1 && blocked_hori[x][y]) b = true;
+                if (y > 0 && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
+                if (y < Y - 1 && blocked_vert[x][y]) b = true;
+                node_has_blk[x][y] = b ? 1 : 0;
+            }
+        }
+        std::vector<std::vector<uint8_t>> vis(X, std::vector<uint8_t>(Y, 0));
+        auto perimeter_is_rect = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            if (minx < 0 || miny < 0 || maxx >= X || maxy >= Y) return false;
+            if (maxx - minx < 2 || maxy - miny < 2) return false;
+            for (int x = minx; x <= maxx - 1; ++x) {
+                if (!blocked_hori[x][miny]) return false;
+                if (!blocked_hori[x][maxy]) return false;
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                if (!blocked_vert[minx][y]) return false;
+                if (!blocked_vert[maxx][y]) return false;
+            }
+            return true;
+        };
+        auto has_interior_blocked = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            for (int y = miny + 1; y <= maxy - 1; ++y) {
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) return true;
+                }
+            }
+            for (int x = minx + 1; x <= maxx - 1; ++x) {
+                for (int y = miny; y <= maxy - 1; ++y) {
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) return true;
+                }
+            }
+            return false;
+        };
+        auto fill_bbox = [&](int minx, int maxx, int miny, int maxy) {
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+        };
+        for (int sx = 0; sx < X; ++sx) {
+            for (int sy = 0; sy < Y; ++sy) {
+                if (!node_has_blk[sx][sy] || vis[sx][sy]) continue;
+                std::queue<std::pair<int, int>> q;
+                q.push({sx, sy});
+                vis[sx][sy] = 1;
+                int minx = sx, maxx = sx, miny = sy, maxy = sy;
+                int cnt_nodes = 0;
+                while (!q.empty()) {
+                    auto [x, y] = q.front();
+                    q.pop();
+                    cnt_nodes++;
+                    minx = std::min(minx, x);
+                    maxx = std::max(maxx, x);
+                    miny = std::min(miny, y);
+                    maxy = std::max(maxy, y);
+                    if (x > 0 && blocked_hori[x - 1][y] && !vis[x - 1][y]) { vis[x - 1][y] = 1; q.push({x - 1, y}); }
+                    if (x < X - 1 && blocked_hori[x][y] && !vis[x + 1][y]) { vis[x + 1][y] = 1; q.push({x + 1, y}); }
+                    if (y > 0 && blocked_vert[x][y - 1] && !vis[x][y - 1]) { vis[x][y - 1] = 1; q.push({x, y - 1}); }
+                    if (y < Y - 1 && blocked_vert[x][y] && !vis[x][y + 1]) { vis[x][y + 1] = 1; q.push({x, y + 1}); }
+                }
+                int w = maxx - minx + 1;
+                int h = maxy - miny + 1;
+                int perimeter_nodes = 2 * w + 2 * h - 4;
+                bool count_ok = (cnt_nodes >= static_cast<int>(0.6 * perimeter_nodes)) &&
+                                (cnt_nodes <= static_cast<int>(1.6 * perimeter_nodes));
+                if (count_ok && perimeter_is_rect(minx, maxx, miny, maxy) && !has_interior_blocked(minx, maxx, miny, maxy)) {
+                    fill_bbox(minx, maxx, miny, maxy);
+                }
+            }
+        }
+    }
+
+    const int scale = (opt.scale <= 0 ? 1 : opt.scale);
+    if (!opt.out_map.empty()) write_map(opt.out_map, image, Z);
+    if (!opt.out_ppm.empty()) write_ppm(opt.out_ppm, image, Z, scale);
+    if (!opt.overflow_ppm.empty()) write_overflow_ppm(opt.overflow_ppm, image, scale);
+    if (!opt.layer_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(opt.layer_dir, ec);
+        if (ec) throw std::runtime_error("render_from_files: failed to create layer dir");
+        for (int z = 0; z < Z; ++z) {
+            std::stringstream ss;
+            ss << opt.layer_dir << "/layer_" << (z + 1) << ".ppm";
+            write_layer_ppm(ss.str(), z, X, Y, vertical, horizontal, edge_nets, node_nets, image, scale);
+        }
+    }
+    if (!opt.nets_ppm.empty()) write_nets_ppm(opt.nets_ppm, image, scale);
+    if (!opt.stats_path.empty()) {
+        Stats st = compute_stats(vertical, horizontal);
+        std::ofstream ofs(opt.stats_path);
+        if (!ofs.is_open()) throw std::runtime_error("render_from_files: failed to open stats output");
+        ofs << "Edges: " << st.edges
+            << " overflow_edges: " << st.overflow_edges << '\n'
+            << "util min/median/p90/p95/p99/max: "
+            << st.min << ' ' << st.p50 << ' ' << st.p90 << ' '
+            << st.p95 << ' ' << st.p99 << ' ' << st.max << '\n';
+    }
+}
+
+void generate_map_from_data(const vlsigr::IspdData& data, const std::string& out_ppm, int scale) {
+    DrawOptions opt;
+    opt.out_ppm = out_ppm;
+    opt.scale = scale;
+    render_from_data(data, opt);
+}
+
+}  // namespace vlsigr::draw
+
+#ifndef VLSIGR_DRAW_LIBRARY
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <input.gr> <output.txt> <map.txt> [image.ppm]"
@@ -501,392 +1125,21 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Parse ISPD input
-    vlsigr::IspdData data;
+    vlsigr::draw::DrawOptions opt;
+    opt.out_map = out_map;
+    opt.out_ppm = out_ppm;
+    opt.overflow_ppm = overflow_ppm;
+    opt.layer_dir = layer_dir;
+    opt.stats_path = stats_path;
+    opt.nets_ppm = nets_ppm;
+    opt.scale = scale;
+
     try {
-        data = vlsigr::parse_ispd_file(in_gr);
+        vlsigr::draw::render_from_files(in_gr, in_out, opt);
     } catch (const std::exception& e) {
-        std::cerr << "Parse gr failed: " << e.what() << std::endl;
+        std::cerr << "draw failed: " << e.what() << "\n";
         return 1;
-    }
-    const int X = data.numXGrid;
-    const int Y = data.numYGrid;
-    const int Z = data.numLayer;
-    
-    auto avg = [](const std::vector<int>& v) {
-        long long s = 0;
-        for (auto x : v) s += x;
-        return v.empty() ? 0 : static_cast<int>(s / static_cast<long long>(v.size()));
-    };
-    int min_net = avg(data.minimumWidth) + avg(data.minimumSpacing);
-    if (min_net <= 0) min_net = 1;
-
-    // Edge capacity per layer
-    EdgeGrid vertical(X, std::vector<std::vector<EdgeAgg>>(Y-1, std::vector<EdgeAgg>(Z)));
-    EdgeGrid horizontal(X-1, std::vector<std::vector<EdgeAgg>>(Y, std::vector<EdgeAgg>(Z)));
-    
-    // Maps to track which nets use which edges/nodes
-    std::map<std::tuple<int,int,int,bool>, std::set<int>> edge_nets; // (x,y,z,hori) -> net IDs
-    std::map<std::tuple<int,int>, std::set<int>> node_nets; // (x,y) -> net IDs (across all layers)
-    
-    for (int z = 0; z < Z; ++z) {
-        int vcap = data.verticalCapacity[z] / min_net;
-        int hcap = data.horizontalCapacity[z] / min_net;
-        for (int x = 0; x < X; ++x)
-            for (int y = 0; y < Y-1; ++y)
-                vertical[x][y][z].cap = vcap;
-        for (int x = 0; x < X-1; ++x)
-            for (int y = 0; y < Y; ++y)
-                horizontal[x][y][z].cap = hcap;
-    }
-    
-    // Apply capacity adjustments
-    std::vector<std::tuple<int, int, int, int, int, int>> blockages;
-    // Blocked edges aggregated across layers (for visualization)
-    std::vector<std::vector<bool>> blocked_hori(X-1, std::vector<bool>(Y, false));   // edge (x,y) between (x,y)-(x+1,y)
-    std::vector<std::vector<bool>> blocked_vert(X,   std::vector<bool>(Y-1, false)); // edge (x,y) between (x,y)-(x,y+1)
-    for (const auto& adj : data.capacityAdjs) {
-        auto [x1,y1,z1] = adj.grid1;
-        auto [x2,y2,z2] = adj.grid2;
-        if (z1 != z2) continue;
-        int z = z1 - 1;
-        int lx = std::min(x1, x2), rx = std::max(x1, x2);
-        int ly = std::min(y1, y2), ry = std::max(y1, y2);
-        int dx = rx - lx, dy = ry - ly;
-        if (dx + dy != 1) continue;
-        bool hori = dx;
-        if (hori) {
-            int cap_layer = data.horizontalCapacity[z] / min_net;
-            horizontal[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
-            if (adj.reducedCapacityLevel <= 0) {
-                blockages.emplace_back(lx, ly, z, lx+1, ly, z);
-                if (lx >= 0 && lx < X-1 && ly >= 0 && ly < Y) blocked_hori[lx][ly] = true;
-            }
-        } else {
-            int cap_layer = data.verticalCapacity[z] / min_net;
-            vertical[lx][ly][z].cap -= (cap_layer - adj.reducedCapacityLevel / min_net);
-            if (adj.reducedCapacityLevel <= 0) {
-                blockages.emplace_back(lx, ly, z, lx, ly+1, z);
-                if (lx >= 0 && lx < X && ly >= 0 && ly < Y-1) blocked_vert[lx][ly] = true;
-            }
-        }
-    }
-
-    // Accumulate demand from output segments AND track net usage
-    std::ifstream fin(in_out);
-    if (!fin.is_open()) {
-        std::cerr << "Failed to open routing output: " << in_out << std::endl;
-        return 1;
-    }
-    int seg_count = 0, via_count = 0, net_count = 0, skip_count = 0;
-    while (!fin.eof()) {
-        std::string netname, line;
-        int id;
-        if (!(fin >> netname >> id)) break;
-        net_count++;
-        fin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        while (std::getline(fin, line)) {
-            if (line == "!") break;
-            if (line.empty()) continue;
-            auto [x1r,y1r,z1,x2r,y2r,z2] = parse_segment(line);
-            int x1 = (x1r - data.lowerLeftX) / data.tileWidth;
-            int y1 = (y1r - data.lowerLeftY) / data.tileHeight;
-            int x2 = (x2r - data.lowerLeftX) / data.tileWidth;
-            int y2 = (y2r - data.lowerLeftY) / data.tileHeight;
-            int z  = z1 - 1;
-            int zt = z2 - 1;
-            if (z != zt) {
-                via_count++;
-                // Mark both nodes as using this net
-                node_nets[{x1, y1}].insert(id);
-                node_nets[{x2, y2}].insert(id);
-                continue;
-            }
-            if (x1 == x2 && y1 == y2) { skip_count++; continue; }
-            if (z < 0 || z >= Z) { skip_count++; continue; }
-            if (y1 == y2) {
-                // horizontal edge
-                if (x1 > x2) std::swap(x1, x2);
-                for (int x = x1; x < x2; ++x) {
-                    if (x < 0 || x >= X-1 || y1 < 0 || y1 >= Y) continue;
-                    horizontal[x][y1][z].demand++;
-                    edge_nets[{x, y1, z, true}].insert(id);
-                    // Mark BOTH nodes adjacent to this edge so long segments become continuous.
-                    node_nets[{x, y1}].insert(id);
-                    node_nets[{x + 1, y1}].insert(id);
-                    seg_count++;
-                }
-                // (endpoints already covered by the per-edge marking above)
-            } else if (x1 == x2) {
-                // vertical edge
-                if (y1 > y2) std::swap(y1, y2);
-                for (int y = y1; y < y2; ++y) {
-                    if (x1 < 0 || x1 >= X || y < 0 || y >= Y-1) continue;
-                    vertical[x1][y][z].demand++;
-                    edge_nets[{x1, y, z, false}].insert(id);
-                    // Mark BOTH nodes adjacent to this edge so long segments become continuous.
-                    node_nets[{x1, y}].insert(id);
-                    node_nets[{x1, y + 1}].insert(id);
-                    seg_count++;
-                }
-                // (endpoints already covered by the per-edge marking above)
-            }
-        }
-    }
-    fin.close();
-    std::cerr << "Parsed " << net_count << " nets, " << seg_count << " segments, " 
-              << via_count << " vias, " << skip_count << " skipped from output\n";
-
-    // Build image grid (2*X-1 by 2*Y-1), top to bottom
-    int iw = 2 * X - 1;
-    int ih = 2 * Y - 1;
-    std::vector<std::vector<Cell>> image(ih, std::vector<Cell>(iw));
-    for (int i = 0; i < ih; ++i) {
-        for (int j = 0; j < iw; ++j) {
-            int x = j / 2;
-            int y = (ih - 1 - i) / 2;
-            auto& cell = image[i][j];
-            cell.x = x; cell.y = y;
-            switch (((i % 2) << 1) | (j % 2)) {
-                case 0: { // node
-                    cell.via = 0;
-                    if (node_nets.count({x, y})) {
-                        cell.nets = node_nets[{x, y}];
-                    }
-                    // Node is blockage if any incident blocked edge exists
-                    bool b = false;
-                    if (x > 0 && x-1 < X-1 && y >= 0 && y < Y && blocked_hori[x-1][y]) b = true;
-                    if (x < X-1 && y >= 0 && y < Y && blocked_hori[x][y]) b = true;
-                    if (y > 0 && x >= 0 && x < X && y-1 < Y-1 && blocked_vert[x][y-1]) b = true;
-                    if (y < Y-1 && x >= 0 && x < X && blocked_vert[x][y]) b = true;
-                    cell.blockage = b;
-                    break;
-                }
-                case 1: { // horizontal edge
-                    cell.via = -1;
-                    int demand = 0, cap = 0;
-                    if (x >= 0 && x < X-1 && y >= 0 && y < Y) {
-                        for (int z = 0; z < Z; ++z) {
-                            demand += horizontal[x][y][z].demand;
-                            cap    += horizontal[x][y][z].cap;
-                            if (edge_nets.count({x, y, z, true})) {
-                                for (int net_id : edge_nets[{x, y, z, true}]) {
-                                    cell.nets.insert(net_id);
-                                }
-                            }
-                        }
-                    }
-                    cell.demand = demand;
-                    cell.cap = cap;
-                    // Mark blockage edge (aggregated across layers)
-                    if (x >= 0 && x < X-1 && y >= 0 && y < Y && blocked_hori[x][y]) cell.blockage = true;
-                    break;
-                }
-                case 2: { // vertical edge
-                    cell.via = -2;
-                    int demand = 0, cap = 0;
-                    if (x >= 0 && x < X && y >= 0 && y < Y-1) {
-                        for (int z = 0; z < Z; ++z) {
-                            demand += vertical[x][y][z].demand;
-                            cap    += vertical[x][y][z].cap;
-                            if (edge_nets.count({x, y, z, false})) {
-                                for (int net_id : edge_nets[{x, y, z, false}]) {
-                                    cell.nets.insert(net_id);
-                                }
-                            }
-                        }
-                    }
-                    cell.demand = demand;
-                    cell.cap = cap;
-                    // Mark blockage edge (aggregated across layers)
-                    if (x >= 0 && x < X && y >= 0 && y < Y-1 && blocked_vert[x][y]) cell.blockage = true;
-                    break;
-                }
-                default: { // filler
-                    cell.via = -3;
-                }
-            }
-        }
-    }
-
-    // Solid-fill rectangular obstacles:
-    // Find connected components in the blocked-edge graph, and only fill those whose
-    // bounding-box perimeter edges are ALL blocked (i.e. a true rectangle frame).
-    {
-        std::vector<std::vector<uint8_t>> node_has_blk(X, std::vector<uint8_t>(Y, 0));
-        for (int x = 0; x < X; ++x) {
-            for (int y = 0; y < Y; ++y) {
-                bool b = false;
-                if (x > 0 && x - 1 < X - 1 && blocked_hori[x - 1][y]) b = true;
-                if (x < X - 1 && blocked_hori[x][y]) b = true;
-                if (y > 0 && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
-                if (y < Y - 1 && blocked_vert[x][y]) b = true;
-                node_has_blk[x][y] = b ? 1 : 0;
-            }
-        }
-
-        std::vector<std::vector<uint8_t>> vis(X, std::vector<uint8_t>(Y, 0));
-        auto perimeter_is_rect = [&](int minx, int maxx, int miny, int maxy) -> bool {
-            if (minx < 0 || miny < 0 || maxx >= X || maxy >= Y) return false;
-            if (maxx - minx < 2 || maxy - miny < 2) return false; // require at least 3x3 nodes
-            // top/bottom horizontal edges
-            for (int x = minx; x <= maxx - 1; ++x) {
-                if (!blocked_hori[x][miny]) return false;
-                if (!blocked_hori[x][maxy]) return false;
-            }
-            // left/right vertical edges
-            for (int y = miny; y <= maxy - 1; ++y) {
-                if (!blocked_vert[minx][y]) return false;
-                if (!blocked_vert[maxx][y]) return false;
-            }
-            return true;
-        };
-
-        auto has_interior_blocked = [&](int minx, int maxx, int miny, int maxy) -> bool {
-            // Any blocked edges strictly inside the bbox => not a pure rectangle frame (avoid cross/mesh overfill).
-            // Interior horizontal edges: y strictly inside, x across bbox span.
-            for (int y = miny + 1; y <= maxy - 1; ++y) {
-                for (int x = minx; x <= maxx - 1; ++x) {
-                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) return true;
-                }
-            }
-            // Interior vertical edges: x strictly inside, y across bbox span.
-            for (int x = minx + 1; x <= maxx - 1; ++x) {
-                for (int y = miny; y <= maxy - 1; ++y) {
-                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) return true;
-                }
-            }
-            return false;
-        };
-
-        auto fill_bbox = [&](int minx, int maxx, int miny, int maxy) {
-            // nodes
-            for (int y = miny; y <= maxy; ++y) {
-                int ii = (ih - 1) - 2 * y;
-                for (int x = minx; x <= maxx; ++x) {
-                    int jj = 2 * x;
-                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
-                }
-            }
-            // horizontal edges
-            for (int y = miny; y <= maxy; ++y) {
-                int ii = (ih - 1) - 2 * y;
-                for (int x = minx; x <= maxx - 1; ++x) {
-                    int jj = 2 * x + 1;
-                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
-                }
-            }
-            // vertical edges
-            for (int y = miny; y <= maxy - 1; ++y) {
-                int ii = (ih - 1) - (2 * y + 1);
-                for (int x = minx; x <= maxx; ++x) {
-                    int jj = 2 * x;
-                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
-                }
-            }
-            // fillers
-            for (int y = miny; y <= maxy - 1; ++y) {
-                int ii = (ih - 1) - (2 * y + 1);
-                for (int x = minx; x <= maxx - 1; ++x) {
-                    int jj = 2 * x + 1;
-                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
-                }
-            }
-        };
-
-        for (int sx = 0; sx < X; ++sx) {
-            for (int sy = 0; sy < Y; ++sy) {
-                if (!node_has_blk[sx][sy] || vis[sx][sy]) continue;
-
-                std::queue<std::pair<int,int>> q;
-                q.push({sx, sy});
-                vis[sx][sy] = 1;
-
-                int minx = sx, maxx = sx, miny = sy, maxy = sy;
-                int cnt_nodes = 0;
-                while (!q.empty()) {
-                    auto [x, y] = q.front(); q.pop();
-                    cnt_nodes++;
-                    minx = std::min(minx, x); maxx = std::max(maxx, x);
-                    miny = std::min(miny, y); maxy = std::max(maxy, y);
-
-                    // traverse along blocked edges only
-                    // left
-                    if (x > 0 && blocked_hori[x - 1][y] && !vis[x - 1][y]) {
-                        vis[x - 1][y] = 1;
-                        q.push({x - 1, y});
-                    }
-                    // right
-                    if (x < X - 1 && blocked_hori[x][y] && !vis[x + 1][y]) {
-                        vis[x + 1][y] = 1;
-                        q.push({x + 1, y});
-                    }
-                    // down
-                    if (y > 0 && blocked_vert[x][y - 1] && !vis[x][y - 1]) {
-                        vis[x][y - 1] = 1;
-                        q.push({x, y - 1});
-                    }
-                    // up
-                    if (y < Y - 1 && blocked_vert[x][y] && !vis[x][y + 1]) {
-                        vis[x][y + 1] = 1;
-                        q.push({x, y + 1});
-                    }
-                }
-
-                int w = maxx - minx + 1;
-                int h = maxy - miny + 1;
-                int perimeter_nodes = 2 * w + 2 * h - 4;
-                // Outline should be close to perimeter in node count (avoid sparse/complex components).
-                bool count_ok = (cnt_nodes >= static_cast<int>(0.6 * perimeter_nodes)) &&
-                                (cnt_nodes <= static_cast<int>(1.6 * perimeter_nodes));
-
-                if (count_ok && perimeter_is_rect(minx, maxx, miny, maxy) && !has_interior_blocked(minx, maxx, miny, maxy)) {
-                    fill_bbox(minx, maxx, miny, maxy);
-                }
-            }
-        }
-    }
-
-    // NOTE: Do NOT expand blockage into neighboring filler cells here.
-    // That expansion caused cyan "bleed" (thickening) along long blocked edges.
-    // Solid rectangles are handled explicitly by fill_bbox(), which already marks fillers inside the bbox.
-
-    write_map(out_map, image, Z);
-    std::cerr << "Map saved to " << out_map << " (size " << iw << " x " << ih << ")\n";
-    if (!out_ppm.empty()) {
-        write_ppm(out_ppm, image, Z, scale);
-    }
-    if (!overflow_ppm.empty()) {
-        write_overflow_ppm(overflow_ppm, image, scale);
-    }
-    if (!layer_dir.empty()) {
-        for (int z = 0; z < Z; ++z) {
-            std::stringstream ss;
-            ss << layer_dir << "/layer_" << (z+1) << ".ppm";
-            write_layer_ppm(ss.str(), z, X, Y, vertical, horizontal, edge_nets, node_nets, image, scale);
-        }
-    }
-    if (!nets_ppm.empty()) {
-        write_nets_ppm(nets_ppm, image, scale);
-    }
-    Stats st = compute_stats(vertical, horizontal);
-    auto emit_stats = [&](std::ostream& os) {
-        os << "Edges: " << st.edges
-           << " overflow_edges: " << st.overflow_edges << '\n'
-           << "util min/median/p90/p95/p99/max: "
-           << st.min << ' ' << st.p50 << ' ' << st.p90 << ' '
-           << st.p95 << ' ' << st.p99 << ' ' << st.max << '\n';
-    };
-    if (!stats_path.empty()) {
-        std::ofstream ofs(stats_path);
-        if (!ofs.is_open()) {
-            std::cerr << "Failed to open stats output: " << stats_path << "\n";
-        } else {
-            emit_stats(ofs);
-            std::cerr << "Stats saved to " << stats_path << "\n";
-        }
-    } else {
-        emit_stats(std::cerr);
     }
     return 0;
 }
+#endif
