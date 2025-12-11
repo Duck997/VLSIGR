@@ -20,7 +20,6 @@ TEST(HUM, RelievesOverflow) {
     GridGraph<Edge> grid;
     grid.init(3, 3, Edge(1), Edge(1));  // tight capacity
     CostModel cm(0);
-    cm.build_cost(grid);
 
     TwoPin tp;
     tp.from = Point(0, 0, 0);
@@ -33,9 +32,15 @@ TEST(HUM, RelievesOverflow) {
     grid.at(2, 0, false).demand += 1; // (2,0)->(2,1)
     grid.at(2, 1, false).demand += 1; // (2,1)->(2,2)
 
-    // First try a simple monotonic path and confirm it overflows
+    // First try the intuitive monotonic corridor and confirm it overflows:
+    // (0,0)->(1,0)->(2,0)->(2,1)->(2,2)
     TwoPin monotonic_tp = tp;
-    vlsigr::patterns::Monotonic(monotonic_tp);
+    monotonic_tp.path = {
+        RPoint(0, 0, true),
+        RPoint(1, 0, true),
+        RPoint(2, 0, false),
+        RPoint(2, 1, false),
+    };
     place_path(monotonic_tp, grid);
     bool mono_overflow = false;
     for (auto& rp : monotonic_tp.path) {
@@ -46,6 +51,8 @@ TEST(HUM, RelievesOverflow) {
     for (auto& rp : monotonic_tp.path) grid.at(rp.x, rp.y, rp.hori).demand -= 1;
 
     // Run HUM and expect no overflow on touched edges
+    // IMPORTANT: rebuild cost after modifying demands, otherwise HUM won't "see" congestion.
+    cm.build_cost(grid);
     hum::HUM(tp, grid, cm, grid.width(), grid.height());
     place_path(tp, grid);
     for (auto& rp : tp.path) {

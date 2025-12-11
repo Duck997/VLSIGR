@@ -10,11 +10,40 @@ A high-performance VLSI global router implementation that incorporates adaptive 
 - **Dependencies**: NumPy, Matplotlib (optional for visualization)
 
 ### Installation
-
+- Build (router + draw):  
+  ```bash
+  make
+  ```
+- Build tests (if有):  
+  ```bash
+  make test
+  ```
 
 ### Usage
+CLI：
+```bash
+# 只跑 routing，不輸出 layer assignment
+./router examples/complex.gr
 
+# 跑 routing 並啟動 Layer Assignment，結果寫出 output.txt
+./router examples/complex.gr output.txt
 
+# 視覺化（congestion / nets）
+./draw examples/complex.gr output.txt examples/complex_map.txt examples/complex.ppm --nets examples/complex_nets.ppm --scale 3
+```
+
+```cpp
+#include "api/vlsigr.hpp"
+using namespace vlsigr;
+
+int main() {
+    GlobalRouter router;
+    router.load_ispd_benchmark("examples/complex.gr");
+    Metrics m = router.route("output.txt"); // 可選：寫出 layer assignment 結果
+    // m.runtime_sec, m.total_overflow, m.total_wirelength
+    return 0;
+}
+```
 ## Features
 
 - **Multi-Mode Cost Function**: Adaptive scoring system with congestion, wirelength, and via optimization
