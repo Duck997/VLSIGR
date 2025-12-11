@@ -69,8 +69,7 @@ struct DrawOptions;
 }  // namespace vlsigr::draw
 
 // ---------------------------------------------------------------------------
-// Proposal compatibility layer (DO NOT change README.rst):
-// Provide the names used in README.rst so the example code compiles as-is.
+// Proposal compatibility layer (compat with published examples)
 // ---------------------------------------------------------------------------
 
 namespace ISPDParser {
@@ -120,7 +119,7 @@ public:
                      const std::string& out_ppm) const;
 
     // Advanced overload: expose the full draw.cpp feature set to API callers.
-    // - out_ppm is kept to match README.rst and will override opt.out_ppm if non-empty.
+    // - out_ppm overrides opt.out_ppm if non-empty.
     void generateMap(const ISPDParser::ispdData* data,
                      const Results& results,
                      const std::string& out_ppm,

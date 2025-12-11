@@ -1,0 +1,21 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vlsigr"
+version = "0.1.0"
+description = "VLSIGR Python bindings (pybind11)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Academic"}
+authors = [{name = "Duck997"}]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+wheel.packages = ["vlsigr"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+
+

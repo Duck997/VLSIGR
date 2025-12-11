@@ -24,6 +24,11 @@ DRAW_OBJS := $(DRAW_SRCS:.cpp=.o)
 CLEAN_EXAMPLES := $(wildcard examples/*.ppm) $(wildcard examples/*.txt) $(wildcard examples/*_map.txt) $(wildcard examples/*_stats.txt) $(wildcard examples/*_overflow.ppm) $(wildcard examples/*_nets.ppm)
 # Workspace-level generated artifacts (do not touch .gr)
 CLEAN_ROOT := $(wildcard *.ppm) $(wildcard *.txt)
+# Python cache cleanup
+CLEAN_PY := $(shell find python -name "__pycache__" -type d 2>/dev/null)
+CLEAN_PYC := $(shell find python -name "*.pyc" -type f 2>/dev/null)
+# Pytest cache
+CLEAN_PYTEST := $(wildcard .pytest_cache) $(wildcard python/.pytest_cache)
 
 TEST_BIN := gtest
 TEST_SRCS := $(wildcard tests/*.cpp)
@@ -46,6 +51,8 @@ test: $(TEST_BIN)
 	./$(TEST_BIN)
 
 clean:
-	$(RM) $(OBJS) $(TEST_OBJS) $(DRAW_OBJS) $(BIN) $(DRAW_BIN) $(TEST_BIN) $(CLEAN_EXAMPLES) $(CLEAN_ROOT)
+	$(RM) $(OBJS) $(TEST_OBJS) $(DRAW_OBJS) $(BIN) $(DRAW_BIN) $(TEST_BIN) $(CLEAN_EXAMPLES) $(CLEAN_ROOT) $(CLEAN_PYC)
+	@if [ -n "$(CLEAN_PY)" ]; then rm -rf $(CLEAN_PY); fi
+	@if [ -n "$(CLEAN_PYTEST)" ]; then rm -rf $(CLEAN_PYTEST); fi
 
 
