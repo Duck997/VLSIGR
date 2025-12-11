@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <set>
 #include <map>
+#include <queue>
 
 #include "router/ispd_data.hpp"
 
@@ -111,8 +112,12 @@ void write_ppm(const std::string& path, const std::vector<std::vector<Cell>>& im
                 int r=22, g=22, b=22;
                 
                 if (cell.via == -3) {
-                    // Filler: match unused edge color for seamless background
-                    r = g = b = 18;
+                    // Filler: background unless it's blockage (then paint solid)
+                    if (cell.blockage) {
+                        r = 0; g = 255; b = 255; // bright cyan
+                    } else {
+                        r = g = b = 18;
+                    }
                 } else {
                     get_cell_color(cell, r, g, b);
                 }
@@ -251,7 +256,11 @@ void write_nets_ppm(const std::string& path,
                 int r=22, g=22, b=22; // default background
                 
                 if (cell.via == -3) {
-                    // Filler: stay background unless a net passes straight through (vertical or horizontal)
+                    // Filler: if it's blockage, paint solid cyan; otherwise use pass-through bridging for nets.
+                    if (cell.blockage) {
+                        r = 0; g = 255; b = 255;
+                    } else {
+                        // Filler: stay background unless a net passes straight through (vertical or horizontal)
                     auto get_color_and_nets = [&](int ni, int nj, int& tr, int& tg, int& tb) -> std::set<int> {
                         if (ni >= 0 && ni < ih && nj >= 0 && nj < iw && image[ni][nj].via != -3) {
                             get_cell_color(image[ni][nj], tr, tg, tb);
@@ -285,6 +294,7 @@ void write_nets_ppm(const std::string& path,
                         b = static_cast<int>((bl + br) * 0.55);
                     } else {
                         r = g = b = 18; // background
+                    }
                     }
                 } else {
                     get_cell_color(cell, r, g, b);
@@ -699,19 +709,147 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Fill in blockage continuity for fillers: if adjacent to any blockage edge/node, mark as blockage.
-    for (int i = 0; i < ih; ++i) {
-        for (int j = 0; j < iw; ++j) {
-            auto& c = image[i][j];
-            if (c.via != -3) continue; // only fillers
-            bool nb = false;
-            if (i > 0 && image[i-1][j].blockage) nb = true;
-            if (i+1 < ih && image[i+1][j].blockage) nb = true;
-            if (j > 0 && image[i][j-1].blockage) nb = true;
-            if (j+1 < iw && image[i][j+1].blockage) nb = true;
-            c.blockage = nb;
+    // Solid-fill rectangular obstacles:
+    // Find connected components in the blocked-edge graph, and only fill those whose
+    // bounding-box perimeter edges are ALL blocked (i.e. a true rectangle frame).
+    {
+        std::vector<std::vector<uint8_t>> node_has_blk(X, std::vector<uint8_t>(Y, 0));
+        for (int x = 0; x < X; ++x) {
+            for (int y = 0; y < Y; ++y) {
+                bool b = false;
+                if (x > 0 && x - 1 < X - 1 && blocked_hori[x - 1][y]) b = true;
+                if (x < X - 1 && blocked_hori[x][y]) b = true;
+                if (y > 0 && y - 1 < Y - 1 && blocked_vert[x][y - 1]) b = true;
+                if (y < Y - 1 && blocked_vert[x][y]) b = true;
+                node_has_blk[x][y] = b ? 1 : 0;
+            }
+        }
+
+        std::vector<std::vector<uint8_t>> vis(X, std::vector<uint8_t>(Y, 0));
+        auto perimeter_is_rect = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            if (minx < 0 || miny < 0 || maxx >= X || maxy >= Y) return false;
+            if (maxx - minx < 2 || maxy - miny < 2) return false; // require at least 3x3 nodes
+            // top/bottom horizontal edges
+            for (int x = minx; x <= maxx - 1; ++x) {
+                if (!blocked_hori[x][miny]) return false;
+                if (!blocked_hori[x][maxy]) return false;
+            }
+            // left/right vertical edges
+            for (int y = miny; y <= maxy - 1; ++y) {
+                if (!blocked_vert[minx][y]) return false;
+                if (!blocked_vert[maxx][y]) return false;
+            }
+            return true;
+        };
+
+        auto has_interior_blocked = [&](int minx, int maxx, int miny, int maxy) -> bool {
+            // Any blocked edges strictly inside the bbox => not a pure rectangle frame (avoid cross/mesh overfill).
+            // Interior horizontal edges: y strictly inside, x across bbox span.
+            for (int y = miny + 1; y <= maxy - 1; ++y) {
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    if (x >= 0 && x < X - 1 && y >= 0 && y < Y && blocked_hori[x][y]) return true;
+                }
+            }
+            // Interior vertical edges: x strictly inside, y across bbox span.
+            for (int x = minx + 1; x <= maxx - 1; ++x) {
+                for (int y = miny; y <= maxy - 1; ++y) {
+                    if (x >= 0 && x < X && y >= 0 && y < Y - 1 && blocked_vert[x][y]) return true;
+                }
+            }
+            return false;
+        };
+
+        auto fill_bbox = [&](int minx, int maxx, int miny, int maxy) {
+            // nodes
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            // horizontal edges
+            for (int y = miny; y <= maxy; ++y) {
+                int ii = (ih - 1) - 2 * y;
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            // vertical edges
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx; ++x) {
+                    int jj = 2 * x;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+            // fillers
+            for (int y = miny; y <= maxy - 1; ++y) {
+                int ii = (ih - 1) - (2 * y + 1);
+                for (int x = minx; x <= maxx - 1; ++x) {
+                    int jj = 2 * x + 1;
+                    if (ii >= 0 && ii < ih && jj >= 0 && jj < iw) image[ii][jj].blockage = true;
+                }
+            }
+        };
+
+        for (int sx = 0; sx < X; ++sx) {
+            for (int sy = 0; sy < Y; ++sy) {
+                if (!node_has_blk[sx][sy] || vis[sx][sy]) continue;
+
+                std::queue<std::pair<int,int>> q;
+                q.push({sx, sy});
+                vis[sx][sy] = 1;
+
+                int minx = sx, maxx = sx, miny = sy, maxy = sy;
+                int cnt_nodes = 0;
+                while (!q.empty()) {
+                    auto [x, y] = q.front(); q.pop();
+                    cnt_nodes++;
+                    minx = std::min(minx, x); maxx = std::max(maxx, x);
+                    miny = std::min(miny, y); maxy = std::max(maxy, y);
+
+                    // traverse along blocked edges only
+                    // left
+                    if (x > 0 && blocked_hori[x - 1][y] && !vis[x - 1][y]) {
+                        vis[x - 1][y] = 1;
+                        q.push({x - 1, y});
+                    }
+                    // right
+                    if (x < X - 1 && blocked_hori[x][y] && !vis[x + 1][y]) {
+                        vis[x + 1][y] = 1;
+                        q.push({x + 1, y});
+                    }
+                    // down
+                    if (y > 0 && blocked_vert[x][y - 1] && !vis[x][y - 1]) {
+                        vis[x][y - 1] = 1;
+                        q.push({x, y - 1});
+                    }
+                    // up
+                    if (y < Y - 1 && blocked_vert[x][y] && !vis[x][y + 1]) {
+                        vis[x][y + 1] = 1;
+                        q.push({x, y + 1});
+                    }
+                }
+
+                int w = maxx - minx + 1;
+                int h = maxy - miny + 1;
+                int perimeter_nodes = 2 * w + 2 * h - 4;
+                // Outline should be close to perimeter in node count (avoid sparse/complex components).
+                bool count_ok = (cnt_nodes >= static_cast<int>(0.6 * perimeter_nodes)) &&
+                                (cnt_nodes <= static_cast<int>(1.6 * perimeter_nodes));
+
+                if (count_ok && perimeter_is_rect(minx, maxx, miny, maxy) && !has_interior_blocked(minx, maxx, miny, maxy)) {
+                    fill_bbox(minx, maxx, miny, maxy);
+                }
+            }
         }
     }
+
+    // NOTE: Do NOT expand blockage into neighboring filler cells here.
+    // That expansion caused cyan "bleed" (thickening) along long blocked edges.
+    // Solid rectangles are handled explicitly by fill_bbox(), which already marks fillers inside the bbox.
 
     write_map(out_map, image, Z);
     std::cerr << "Map saved to " << out_map << " (size " << iw << " x " << ih << ")\n";
