@@ -8,8 +8,34 @@ namespace py = pybind11;
 
 namespace {
 
-// Python-side results handle; kept opaque because visualization uses the router's internal data.
-struct PyResults {};
+struct PyPoint {
+    int x = 0, y = 0, z = 0;
+};
+
+struct PyRPoint {
+    int x = 0, y = 0, z = 0;
+    bool hori = false;
+};
+
+struct PyTwoPin {
+    PyPoint from;
+    PyPoint to;
+    std::vector<PyRPoint> path;
+    int reroute = 0;
+    bool overflow = false;
+};
+
+struct PyNet {
+    std::string name;
+    int id = 0;
+    int numPins = 0;
+    std::vector<PyTwoPin> twopins;
+};
+
+// Python-side results snapshot (deep-copied from router internal state).
+struct PyResults {
+    std::vector<PyNet> nets;
+};
 
 struct PyMetrics {
     double execution_time = 0.0;
@@ -34,6 +60,32 @@ PyMetrics to_py_metrics(const vlsigr::PerformanceMetrics& m) {
     return pm;
 }
 
+PyResults snapshot_results(const vlsigr::IspdData& d) {
+    PyResults r;
+    r.nets.reserve(d.nets.size());
+    for (const auto& net : d.nets) {
+        PyNet n;
+        n.name = net.name;
+        n.id = net.id;
+        n.numPins = net.numPins;
+        n.twopins.reserve(net.twopin.size());
+        for (const auto& tp : net.twopin) {
+            PyTwoPin t;
+            t.from = {tp.from.x, tp.from.y, tp.from.z};
+            t.to = {tp.to.x, tp.to.y, tp.to.z};
+            t.reroute = tp.reroute;
+            t.overflow = tp.overflow;
+            t.path.reserve(tp.path.size());
+            for (const auto& rp : tp.path) {
+                t.path.push_back({rp.x, rp.y, rp.z, rp.hori});
+            }
+            n.twopins.push_back(std::move(t));
+        }
+        r.nets.push_back(std::move(n));
+    }
+    return r;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(vlsigr, m) {
@@ -46,7 +98,32 @@ PYBIND11_MODULE(vlsigr, m) {
         .export_values();
 
     py::class_<PyResults>(m, "Results")
-        .def(py::init<>());
+        .def(py::init<>())
+        .def_readonly("nets", &PyResults::nets);
+
+    py::class_<PyPoint>(m, "Point")
+        .def_readonly("x", &PyPoint::x)
+        .def_readonly("y", &PyPoint::y)
+        .def_readonly("z", &PyPoint::z);
+
+    py::class_<PyRPoint>(m, "RPoint")
+        .def_readonly("x", &PyRPoint::x)
+        .def_readonly("y", &PyRPoint::y)
+        .def_readonly("z", &PyRPoint::z)
+        .def_readonly("hori", &PyRPoint::hori);
+
+    py::class_<PyTwoPin>(m, "TwoPin")
+        .def_readonly("from_", &PyTwoPin::from)
+        .def_readonly("to", &PyTwoPin::to)
+        .def_readonly("path", &PyTwoPin::path)
+        .def_readonly("reroute", &PyTwoPin::reroute)
+        .def_readonly("overflow", &PyTwoPin::overflow);
+
+    py::class_<PyNet>(m, "Net")
+        .def_readonly("name", &PyNet::name)
+        .def_readonly("id", &PyNet::id)
+        .def_readonly("numPins", &PyNet::numPins)
+        .def_readonly("twopins", &PyNet::twopins);
 
     py::class_<PyMetrics>(m, "Metrics")
         .def_readonly("execution_time", &PyMetrics::execution_time)
@@ -73,14 +150,13 @@ PYBIND11_MODULE(vlsigr, m) {
             "route",
             [](vlsigr::GlobalRouter& r, const std::string& output_txt) {
                 r.route(output_txt);
-                return PyResults{};
+                return snapshot_results(r.data());
             },
             py::arg("output_txt") = std::string{})
         .def(
             "get_results",
-            [](const vlsigr::GlobalRouter& /*r*/) {
-                // Keep opaque for now; results live in the router.
-                return PyResults{};
+            [](const vlsigr::GlobalRouter& r) {
+                return snapshot_results(r.data());
             })
         .def(
             "get_metrics",

@@ -25,6 +25,26 @@ def test_python_api_smoke_complex(tmp_path: Path):
     assert metrics.execution_time >= 0.0
     assert metrics.total_overflow >= -1
 
+    # Results structure sanity: nets -> twopins -> path(RPoint)
+    assert hasattr(results, "nets")
+    assert len(results.nets) > 0
+    assert hasattr(results.nets[0], "twopins")
+
+    any_nonempty = False
+    for net in results.nets:
+        for tp in net.twopins:
+            if len(tp.path) > 0:
+                any_nonempty = True
+                rp = tp.path[0]
+                assert isinstance(rp.x, int)
+                assert isinstance(rp.y, int)
+                assert isinstance(rp.z, int)
+                assert isinstance(rp.hori, bool)
+                break
+        if any_nonempty:
+            break
+    assert any_nonempty, "Expected at least one twopin to have a non-empty path"
+
     out_ppm = tmp_path / "routing_result.ppm"
     router.visualize_results(results, str(out_ppm))
     assert out_ppm.exists()
@@ -34,7 +54,9 @@ def test_python_api_smoke_complex(tmp_path: Path):
         magic = f.readline().strip()
         assert magic == "P3"
 
+    # Snapshot should remain usable after cleanup (deep copy).
     router.cleanup()
+    assert len(results.nets) > 0
 
 
 def test_python_api_adaptec1_optional(tmp_path: Path):
