@@ -162,7 +162,6 @@ void Visualization::generateMap(const ISPDParser::ispdData* data,
     const auto* d = results.data ? results.data : data;
     if (!d) throw std::runtime_error("Visualization::generateMap: null data/results");
 
-    // Copy options so we can enforce README.rst-style out_ppm argument.
     ::vlsigr::draw::DrawOptions o = opt;
     if (!out_ppm.empty()) o.out_ppm = out_ppm;
     vlsigr::draw::render_from_data(*d, o);
