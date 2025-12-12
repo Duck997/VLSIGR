@@ -14,7 +14,27 @@ using TwoPinPtr = TwoPin*;
 
 class RoutingCore {
 public:
-    // Net wrapper struct (strictly aligned with GlobalRouting::Net, lines 62-68)
+    struct Config {
+        // If true, use different selcost per phase (pattern/mono/hum/refine).
+        // If false, use selcost_fixed for all phases.
+        bool adaptive_scoring = true;
+        int selcost_fixed = 1;
+
+        int selcost_pattern = 0;
+        int selcost_monotonic = 1;
+        int selcost_hum = 2;
+        int selcost_refine = 0;
+
+        bool enable_hum = true;
+        bool enable_refine = true;
+
+        int iter_lshape = 1;
+        int iter_zshape = 2;
+        int iter_monotonic = 5;
+        int iter_hum = 10000;
+        int refine_iters = 4;
+    };
+
     struct NetWrapper {
         int overflow, overflow_twopin, wlen, reroute;
         double score, cost;
@@ -32,6 +52,8 @@ public:
     RoutingCore();
     ~RoutingCore();
 
+    void set_config(const Config& cfg) { cfg_ = cfg; }
+
     // Main routing entry
     void route(IspdData& data, bool leave = false);
     
@@ -42,7 +64,6 @@ public:
     const GridGraph<Edge>& grid() const { return grid_; }
     
 private:
-    // Core data structures (aligned with GlobalRouting, lines 80-84)
     std::size_t width_, height_;
     int min_width_, min_spacing_, min_net_, mx_cap_;
     GridGraph<Edge> grid_;
@@ -53,8 +74,8 @@ private:
     CostModel cost_model_;
     bool stop_, print_;
     IspdData* ispdData_;
+    Config cfg_{};
 
-    // Core routing operations (aligned with GlobalRouting)
     void ripup(TwoPinPtr twopin);
     void place(TwoPinPtr twopin);
     

@@ -29,7 +29,7 @@ RoutingCore::NetWrapper::NetWrapper(Net* n)
 // Constructor
 RoutingCore::RoutingCore()
     : width_(0), height_(0), min_width_(0), min_spacing_(0), min_net_(0), mx_cap_(0),
-      selcost_(0), stop_(false), print_(true), ispdData_(nullptr) {}
+      selcost_(0), stop_(false), print_(true), ispdData_(nullptr), cfg_{} {}
 
 // Destructor
 RoutingCore::~RoutingCore() {
@@ -540,31 +540,49 @@ void RoutingCore::route(IspdData& data, bool leave) {
         }
     }
     
-    selcost_ = 0;
-    cost_model_.set_selcost(0);
+    // Select initial selcost
+    if (cfg_.adaptive_scoring) {
+        selcost_ = cfg_.selcost_pattern;
+    } else {
+        selcost_ = cfg_.selcost_fixed;
+    }
+    cost_model_.set_selcost(selcost_);
     preroute(data);
     if (leave) return;
     
-    selcost_ = 0;
-    
-    try { routing("Lshape", &RoutingCore::Lshape, 1, selcost_); }
-    catch (bool done) { if (!done) throw; }
-    
-    try { routing("Zshape", &RoutingCore::Zshape, 2, selcost_); }
-    catch (bool done) { if (!done) throw; }
-    
-    selcost_ = 1;
-    try { routing("monotonic", &RoutingCore::monotonic, 5, selcost_); }
-    catch (bool done) { if (!done) throw; }
-    
-    selcost_ = 2;
-    try { routing("HUM", &RoutingCore::HUM, 10000, selcost_); }
-    catch (bool done) { if (!done) throw; }
-    
-    selcost_ = 0;
-    refine_wirelength("refine WL monotonic", &RoutingCore::monotonic, 4, selcost_);
-    refine_wirelength("refine WL Zshape", &RoutingCore::Zshape, 4, selcost_);
-    refine_wirelength("refine WL Lshape", &RoutingCore::Lshape, 4, selcost_);
+    auto sel_for = [&](int phase_selcost) -> int {
+        return cfg_.adaptive_scoring ? phase_selcost : cfg_.selcost_fixed;
+    };
+
+    try {
+        if (cfg_.iter_lshape > 0)
+            routing("Lshape", &RoutingCore::Lshape, cfg_.iter_lshape, sel_for(cfg_.selcost_pattern));
+    } catch (bool done) { if (!done) throw; }
+
+    try {
+        if (cfg_.iter_zshape > 0)
+            routing("Zshape", &RoutingCore::Zshape, cfg_.iter_zshape, sel_for(cfg_.selcost_pattern));
+    } catch (bool done) { if (!done) throw; }
+
+    try {
+        if (cfg_.iter_monotonic > 0)
+            routing("monotonic", &RoutingCore::monotonic, cfg_.iter_monotonic, sel_for(cfg_.selcost_monotonic));
+    } catch (bool done) { if (!done) throw; }
+
+    if (cfg_.enable_hum) {
+        try {
+            if (cfg_.iter_hum > 0)
+                routing("HUM", &RoutingCore::HUM, cfg_.iter_hum, sel_for(cfg_.selcost_hum));
+        } catch (bool done) { if (!done) throw; }
+    }
+
+    if (cfg_.enable_refine) {
+        const int it = cfg_.refine_iters;
+        const int sel = sel_for(cfg_.selcost_refine);
+        refine_wirelength("refine WL monotonic", &RoutingCore::monotonic, it, sel);
+        refine_wirelength("refine WL Zshape", &RoutingCore::Zshape, it, sel);
+        refine_wirelength("refine WL Lshape", &RoutingCore::Lshape, it, sel);
+    }
 }
 
 // Legacy interface for backward compatibility

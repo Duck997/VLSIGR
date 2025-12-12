@@ -50,11 +50,42 @@ void GlobalRouter::route(const std::string& la_output) {
 
     auto t0 = std::chrono::steady_clock::now();
 
-    (void)mode_;
-    (void)adaptive_scoring_;
-    (void)hum_;
-
     RoutingCore core;
+    // Map API flags to routing core behavior.
+    RoutingCore::Config cfg;
+    cfg.adaptive_scoring = adaptive_scoring_;
+    cfg.enable_hum = hum_;
+
+    switch (mode_) {
+        case Mode::CONGESTION:
+            cfg.selcost_fixed = 2;
+            cfg.selcost_pattern = 2;
+            cfg.selcost_monotonic = 2;
+            cfg.selcost_hum = 2;
+            cfg.selcost_refine = 2;
+            cfg.enable_refine = false;
+            break;
+        case Mode::WIRELENGTH:
+            cfg.selcost_fixed = 0;
+            cfg.selcost_pattern = 0;
+            cfg.selcost_monotonic = 0;
+            cfg.selcost_hum = 1;     // still discourages congestion, but milder than 2
+            cfg.selcost_refine = 0;
+            cfg.enable_refine = true;
+            cfg.refine_iters = 8;
+            break;
+        case Mode::BALANCED:
+        default:
+            cfg.selcost_fixed = 1;
+            cfg.selcost_pattern = 0;
+            cfg.selcost_monotonic = 1;
+            cfg.selcost_hum = 2;
+            cfg.selcost_refine = 0;
+            cfg.enable_refine = true;
+            cfg.refine_iters = 4;
+            break;
+    }
+    core.set_config(cfg);
     try {
         core.route(data_, false);
     } catch (bool /*done*/) {
@@ -101,9 +132,6 @@ PerformanceMetrics route_ispd_file(const std::string& gr_path, const std::string
 
 }  // namespace vlsigr
 
-// ---------------------------------------------------------------------------
-// Proposal compatibility layer implementations
-// ---------------------------------------------------------------------------
 
 namespace ISPDParser {
 
