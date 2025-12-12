@@ -102,6 +102,28 @@ make test
 VLSIGR_RUN_ADAPTEC1=1 make test
 ```
 
+## Benchmark Results (ISPD 2008)
+
+**Environment**
+- **CPU**: 13th Gen Intel(R) Core(TM) i7-13700HX (8 logical CPUs)
+- **Memory**: 12 GiB
+- **OS**: Ubuntu 22.04
+
+| Benchmarks | TOF | MOF | WL | Runtime (sec) |
+|---|---:|---:|---:|---:|
+| adaptec1 | 0 | 0 | 6609421 | 201.49 |
+| adaptec2 | 0 | 0 | 5851083 | 74.95 |
+| adaptec3 | 0 | 0 | 14750808 | 288.24 |
+| adaptec4 | 0 | 0 | 12446724 | 93.14 |
+| adaptec5 | 0 | 0 | 17905064 | 410.28 |
+| bigblue1 | 0 | 0 | 7259427 | 328.64 |
+| bigblue2 | 120 | 2 | 10611910 | 1294.62 |
+| bigblue3 | 0 | 0 | 13758934 | 160.13 |
+| newblue1 | 34 | 2 | 5423906 | 1677.29 |
+| newblue2 | 0 | 0 | 7703791 | 40.87 |
+| newblue5 | 0 | 0 | 26484667 | 518.35 |
+| newblue6 | 0 | 0 | 20798696 | 406.46 |
+
 ## Features
 
 - **Multi-Mode Cost Function**: Adaptive scoring system with congestion, wirelength, and via optimization
