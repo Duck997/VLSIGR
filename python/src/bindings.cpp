@@ -168,6 +168,8 @@ PYBIND11_MODULE(vlsigr, m) {
                const std::string& out_ppm,
                py::object nets_ppm,
                py::object overflow_ppm,
+               bool overflow_show_blockages,
+               int overflow_x_size,
                py::object layer_dir,
                py::object stats_path,
                py::object out_map,
@@ -181,6 +183,8 @@ PYBIND11_MODULE(vlsigr, m) {
                 };
                 set_opt_str(nets_ppm, opt.nets_ppm);
                 set_opt_str(overflow_ppm, opt.overflow_ppm);
+                opt.overflow_show_blockages = overflow_show_blockages;
+                opt.overflow_x_size = overflow_x_size;
                 set_opt_str(layer_dir, opt.layer_dir);
                 set_opt_str(stats_path, opt.stats_path);
                 set_opt_str(out_map, opt.out_map);
@@ -192,6 +196,8 @@ PYBIND11_MODULE(vlsigr, m) {
             py::kw_only(),
             py::arg("nets_ppm") = py::none(),
             py::arg("overflow_ppm") = py::none(),
+            py::arg("overflow_show_blockages") = false,
+            py::arg("overflow_x_size") = 0,
             py::arg("layer_dir") = py::none(),
             py::arg("stats_path") = py::none(),
             py::arg("out_map") = py::none(),

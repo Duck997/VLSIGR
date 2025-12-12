@@ -139,45 +139,97 @@ void write_ppm(const std::string& path, const std::vector<std::vector<Cell>>& im
     std::cerr << "PPM saved to " << path << " (size " << iw * scale << " x " << ih * scale << ", scale=" << scale << ")\n";
 }
 
-// Only highlight overflow edges (red) on dark background
-[[maybe_unused]] void write_overflow_ppm(const std::string& path, const std::vector<std::vector<Cell>>& image, int scale = 1) {
+// Only highlight overflow edges (red) on dark background.
+// Optionally, also paint blockages (cyan) for debugging.
+[[maybe_unused]] void write_overflow_ppm(const std::string& path,
+                                        const std::vector<std::vector<Cell>>& image,
+                                        int scale = 1,
+                                        bool show_blockages = false,
+                                        int x_size = 0) {
     const int ih = static_cast<int>(image.size());
     const int iw = ih ? static_cast<int>(image[0].size()) : 0;
+
+    const int ow = iw * scale;
+    const int oh = ih * scale;
+
+    // Auto size: scale*3 for small images; for large images, increase slightly so it's visible.
+    if (x_size <= 0) {
+        int base = std::max(3, scale * 3);
+        int bump = std::max(0, (std::min(ow, oh) / 250));  // ~0.4% of min dimension
+        x_size = std::max(base, bump);
+        if (x_size % 2 == 0) x_size += 1;                 // make odd
+        if (x_size < 3) x_size = 3;
+    } else {
+        if (x_size < 3) x_size = 3;
+        if (x_size % 2 == 0) x_size += 1;
+    }
+    const int rX = x_size / 2;
+
+    struct RGB { unsigned char r, g, b; };
+    std::vector<RGB> buf(static_cast<std::size_t>(ow) * static_cast<std::size_t>(oh), RGB{12, 12, 12});
+    auto put = [&](int y, int x, unsigned char r, unsigned char g, unsigned char b) {
+        if (x < 0 || x >= ow || y < 0 || y >= oh) return;
+        buf[static_cast<std::size_t>(y) * static_cast<std::size_t>(ow) + static_cast<std::size_t>(x)] = RGB{r, g, b};
+    };
+
+    // Base colors (blockages / overflow edges / blocked edges) expanded by scale.
+    for (int i = 0; i < ih; ++i) {
+        for (int j = 0; j < iw; ++j) {
+            const auto& e = image[i][j];
+            int r = 12, g = 12, b = 12;
+            if (show_blockages && e.blockage) {
+                r = 0; g = 255; b = 200;
+            } else if ((e.via == -1 || e.via == -2) && e.cap > 0 && e.demand > e.cap) {
+                r = 255; g = 0; b = 0;
+            } else if ((e.via == -1 || e.via == -2) && e.cap <= 0) {
+                r = g = b = 0;
+            }
+            for (int si = 0; si < scale; ++si) {
+                int yy = i * scale + si;
+                for (int sj = 0; sj < scale; ++sj) {
+                    int xx = j * scale + sj;
+                    put(yy, xx, static_cast<unsigned char>(r), static_cast<unsigned char>(g), static_cast<unsigned char>(b));
+                }
+            }
+        }
+    }
+
+    // Overlay enlarged X marks centered on overflow edges.
+    auto paint_x = [&](int cy, int cx) {
+        // thickness 1 (can be increased later if needed)
+        for (int d = -rX; d <= rX; ++d) {
+            put(cy + d, cx + d, 80, 80, 80);
+            put(cy + d, cx - d, 80, 80, 80);
+        }
+    };
+
+    for (int i = 0; i < ih; ++i) {
+        for (int j = 0; j < iw; ++j) {
+            const auto& e = image[i][j];
+            bool over = (e.via == -1 || e.via == -2) && e.cap > 0 && e.demand > e.cap;
+            if (!over) continue;
+            const int cy = i * scale + (scale / 2);
+            const int cx = j * scale + (scale / 2);
+            paint_x(cy, cx);
+        }
+    }
+
     FILE* fp = std::fopen(path.c_str(), "w");
     if (!fp) {
         std::cerr << "Failed to open overflow ppm output: " << path << std::endl;
         return;
     }
-    std::fprintf(fp, "P3\n%d %d\n255\n", iw * scale, ih * scale);
-    
-    for (int i = 0; i < ih; ++i) {
-        for (int si = 0; si < scale; ++si) {
-            for (int j = 0; j < iw; ++j) {
-                const auto& e = image[i][j];
-                int r=12, g=12, b=12;
-                
-                if (e.blockage) {
-                    r = 0; g = 255; b = 200;
-                } else if ((e.via == -1 || e.via == -2) && e.cap > 0 && e.demand > e.cap) {
-                    r = 255; g = 0; b = 0;
-                } else if ((e.via == -1 || e.via == -2) && e.cap <= 0) {
-                    r = g = b = 0;
-                }
-                
-                bool over = (e.via == -1 || e.via == -2) && e.cap > 0 && e.demand > e.cap;
-                for (int sj = 0; sj < scale; ++sj) {
-                    if (over && (si == sj || si + sj == scale - 1)) {
-                        std::fprintf(fp, "%d %d %d ", 80, 80, 80);
-                    } else {
-                        std::fprintf(fp, "%d %d %d ", r, g, b);
-                    }
-                }
-            }
-            std::fprintf(fp, "\n");
+    std::fprintf(fp, "P3\n%d %d\n255\n", ow, oh);
+    for (int y = 0; y < oh; ++y) {
+        for (int x = 0; x < ow; ++x) {
+            const auto& p = buf[static_cast<std::size_t>(y) * static_cast<std::size_t>(ow) + static_cast<std::size_t>(x)];
+            std::fprintf(fp, "%d %d %d ", (int)p.r, (int)p.g, (int)p.b);
         }
+        std::fprintf(fp, "\n");
     }
     std::fclose(fp);
-    std::cerr << "Overflow mask saved to " << path << " (size " << iw * scale << " x " << ih * scale << ", scale=" << scale << ")\n";
+    std::cerr << "Overflow mask saved to " << path << " (size " << ow << " x " << oh
+              << ", scale=" << scale << ", x_size=" << x_size << ")\n";
 }
 
 // Color by net ID (each net uses distinct color from palette)
@@ -730,7 +782,7 @@ void render_from_data(const vlsigr::IspdData& data, const DrawOptions& opt) {
         write_ppm(opt.out_ppm, image, Z, scale);
     }
     if (!opt.overflow_ppm.empty()) {
-        write_overflow_ppm(opt.overflow_ppm, image, scale);
+        write_overflow_ppm(opt.overflow_ppm, image, scale, opt.overflow_show_blockages, opt.overflow_x_size);
     }
     if (!opt.layer_dir.empty()) {
         std::error_code ec;
@@ -1046,7 +1098,7 @@ void render_from_files(const std::string& input_gr,
     const int scale = (opt.scale <= 0 ? 1 : opt.scale);
     if (!opt.out_map.empty()) write_map(opt.out_map, image, Z);
     if (!opt.out_ppm.empty()) write_ppm(opt.out_ppm, image, Z, scale);
-    if (!opt.overflow_ppm.empty()) write_overflow_ppm(opt.overflow_ppm, image, scale);
+    if (!opt.overflow_ppm.empty()) write_overflow_ppm(opt.overflow_ppm, image, scale, opt.overflow_show_blockages, opt.overflow_x_size);
     if (!opt.layer_dir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(opt.layer_dir, ec);
@@ -1083,7 +1135,9 @@ void generate_map_from_data(const vlsigr::IspdData& data, const std::string& out
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <input.gr> <output.txt> <map.txt> [image.ppm]"
-                  << " [--overflow overflow.ppm] [--layers dir] [--stats stats.txt] [--nets nets.ppm] [--scale N]\n";
+                  << " [--overflow overflow.ppm] [--overflow-show-blockages]"
+                  << " [--overflow-x-size N]"
+                  << " [--layers dir] [--stats stats.txt] [--nets nets.ppm] [--scale N]\n";
         return 1;
     }
     std::string in_gr = argv[1];
@@ -1091,6 +1145,8 @@ int main(int argc, char* argv[]) {
     std::string out_map = argv[3];
     std::string out_ppm;
     std::string overflow_ppm, layer_dir, stats_path, nets_ppm;
+    bool overflow_show_blockages = false;
+    int overflow_x_size = 0;
     int scale = 1;
 
     int arg_idx = 4;
@@ -1102,6 +1158,10 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[arg_idx];
         if (arg == "--overflow" && arg_idx + 1 < argc) {
             overflow_ppm = argv[++arg_idx];
+        } else if (arg == "--overflow-show-blockages") {
+            overflow_show_blockages = true;
+        } else if (arg == "--overflow-x-size" && arg_idx + 1 < argc) {
+            overflow_x_size = std::stoi(argv[++arg_idx]);
         } else if (arg == "--layers" && arg_idx + 1 < argc) {
             layer_dir = argv[++arg_idx];
         } else if (arg == "--stats" && arg_idx + 1 < argc) {
@@ -1129,6 +1189,8 @@ int main(int argc, char* argv[]) {
     opt.out_map = out_map;
     opt.out_ppm = out_ppm;
     opt.overflow_ppm = overflow_ppm;
+    opt.overflow_show_blockages = overflow_show_blockages;
+    opt.overflow_x_size = overflow_x_size;
     opt.layer_dir = layer_dir;
     opt.stats_path = stats_path;
     opt.nets_ppm = nets_ppm;

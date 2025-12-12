@@ -13,6 +13,8 @@ struct DrawOptions {
 
     // Optional extra outputs (match draw CLI)
     std::string overflow_ppm;   // overflow mask PPM
+    bool overflow_show_blockages = false; // if true, color blockages in overflow mask
+    int overflow_x_size = 0;    // size (pixels) of the 'X' mark on overflow edges; 0 = auto
     std::string nets_ppm;       // net-colored PPM
     std::string layer_dir;      // per-layer PPM directory
     std::string stats_path;     // stats txt path
