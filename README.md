@@ -127,7 +127,7 @@ VLSIGR_RUN_ADAPTEC1=1 make test
 ## Features
 
 - **Multi-Mode Cost Function**: Adaptive scoring system with congestion, wirelength, and via optimization
-- **History-based Updating Method (HUM)**: Iterative routing improvement with dual expansion strategy
+- **Hybrid Unilateral Monotonic (HUM)**: Iterative routing improvement with dual expansion strategy
 - **Pattern Routing**: Initial routing with L-shape and Z-shape patterns
 - **Layer Assignment**: Multi-layer routing with via optimization
 - **Visualization Tools**: PPM format output with congestion color coding
